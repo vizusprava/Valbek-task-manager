@@ -31,7 +31,7 @@ async function init() {
 async function loadProjectData() {
   const { data: proj, error } = await db
     .from('projects')
-    .select('*, project_members(user_id, profiles(id, name, role))')
+    .select('*, project_members(user_id, profiles(id, name, role, initials, color))')
     .eq('id', projectId)
     .single()
 
