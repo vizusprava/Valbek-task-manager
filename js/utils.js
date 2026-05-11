@@ -1,3 +1,23 @@
+// ── Avatar ────────────────────────────────────────────────────
+
+const AVATAR_COLORS = [
+  '#4F46E5', '#0891B2', '#059669', '#D97706',
+  '#DC2626', '#7C3AED', '#DB2777', '#0284C7',
+]
+
+function avatarColor(name) {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]
+}
+
+function avatar(name, small = false) {
+  const initials = name.slice(0, 2)
+  const color    = avatarColor(name)
+  const cls      = small ? 'avatar avatar-sm' : 'avatar'
+  return `<span class="${cls}" title="${esc(name)}" style="background:${color}">${esc(initials)}</span>`
+}
+
 // ── Formátování ──────────────────────────────────────────────
 
 function formatDate(iso) {

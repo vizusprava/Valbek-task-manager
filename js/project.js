@@ -70,9 +70,7 @@ async function loadProjectData() {
   // Members bar
   document.getElementById('members-bar').innerHTML = `
     <div class="members-list">
-      ${projectMembers.map(m => `
-        <span class="avatar" title="${esc(m.name)}">${esc(m.name.charAt(0))}</span>
-      `).join('')}
+      ${projectMembers.map(m => avatar(m.name)).join('')}
       <span class="members-label">${projectMembers.map(m => esc(m.name)).join(', ')}</span>
     </div>
     ${isAdmin() ? `
@@ -171,7 +169,7 @@ function renderTaskList(tasks) {
                 <span class="task-title">${esc(t.title)}</span>
                 ${t.description ? `<span class="task-desc-preview">${esc(t.description.substring(0, 60))}${t.description.length > 60 ? '…' : ''}</span>` : ''}
               </td>
-              <td>${t.assigned ? `<span class="avatar avatar-sm" title="${esc(t.assigned.name)}">${esc(t.assigned.name.charAt(0))}</span> ${esc(t.assigned.name)}` : '<span class="text-muted">–</span>'}</td>
+              <td>${t.assigned ? `${avatar(t.assigned.name, true)} ${esc(t.assigned.name)}` : '<span class="text-muted">–</span>'}</td>
               ${statusTd}${priorTd}${dueTd}${pathTd}
             </tr>
           `

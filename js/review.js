@@ -77,7 +77,7 @@ function renderReview() {
                   ${t.description ? `<span class="task-desc-preview">${esc(t.description.substring(0, 70))}${t.description.length > 70 ? '…' : ''}</span>` : ''}
                 </td>
                 <td>${t.assigned
-                  ? `<span class="avatar avatar-sm" title="${esc(t.assigned.name)}">${esc(t.assigned.name.charAt(0))}</span> ${esc(t.assigned.name)}`
+                  ? `${avatar(t.assigned.name, true)} ${esc(t.assigned.name)}`
                   : '<span class="text-muted">–</span>'}</td>
                 <td class="editable-cell" onclick="inlineStatus(event,'${t.id}','${t.status}')" title="Kliknutím změnit">${statusBadge(t.status)}</td>
                 <td class="editable-cell" onclick="inlinePriority(event,'${t.id}','${t.priority}')" title="Kliknutím změnit">${priorityBadge(t.priority)}</td>
