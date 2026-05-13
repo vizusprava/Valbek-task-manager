@@ -328,7 +328,48 @@ INSERT INTO reference_items (page, section, code, name, sort_order) VALUES
 ON CONFLICT DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────
--- 9. REALTIME – povolit pro tabulky
+-- 9. PŘÍLOHY K ÚKOLŮM
+-- ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS task_attachments (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id     UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  uploaded_by UUID NOT NULL REFERENCES profiles(id),
+  file_name   TEXT NOT NULL,
+  file_path   TEXT NOT NULL,
+  file_size   BIGINT,
+  mime_type   TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_attachments ON task_attachments(task_id, created_at DESC);
+
+ALTER TABLE task_attachments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "attach_select" ON task_attachments;
+CREATE POLICY "attach_select" ON task_attachments
+  FOR SELECT TO authenticated
+  USING (is_project_member(task_project_id(task_id)));
+
+DROP POLICY IF EXISTS "attach_insert" ON task_attachments;
+CREATE POLICY "attach_insert" ON task_attachments
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    is_project_member(task_project_id(task_id))
+    AND uploaded_by = auth.uid()
+  );
+
+DROP POLICY IF EXISTS "attach_delete" ON task_attachments;
+CREATE POLICY "attach_delete" ON task_attachments
+  FOR DELETE TO authenticated
+  USING (uploaded_by = auth.uid() OR is_admin());
+
+-- Storage bucket "task-attachments" – vytvořit ručně v Supabase Dashboard:
+-- Storage > New bucket > Name: task-attachments > Public: YES
+-- (nebo Private s signed URL – viz poznámky níže)
+
+-- ────────────────────────────────────────────────────────────
+-- 10. REALTIME – povolit pro tabulky
 -- ────────────────────────────────────────────────────────────
 -- Spustit ručně v Supabase Dashboard:
 -- Database > Replication > zapnout pro: projects, project_members, tasks, comments, notifications

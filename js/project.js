@@ -413,7 +413,18 @@ async function openTaskDetail(taskId) {
 
     <div class="task-tab-bar">
       <button class="task-tab active" id="tab-btn-comments" onclick="switchTaskTab('comments','${taskId}')">💬 Komentáře</button>
+      <button class="task-tab" id="tab-btn-files" onclick="switchTaskTab('files','${taskId}')">📎 Přílohy</button>
       <button class="task-tab" id="tab-btn-history" onclick="switchTaskTab('history','${taskId}')">📋 Historie</button>
+    </div>
+
+    <div id="tab-panel-files" class="task-tab-panel hidden">
+      <div id="attach-list" class="attach-list"></div>
+      <label class="attach-upload-area" id="attach-drop-zone"
+             ondragover="attachDragOver(event)" ondragleave="attachDragLeave(event)" ondrop="attachDrop(event,'${taskId}')">
+        <div>📁 Přetáhni soubor sem nebo <u>klikni pro výběr</u></div>
+        <div style="margin-top:4px;font-size:11px">Max. 20 MB — obrázky, PDF, DWG, …</div>
+        <input type="file" multiple onchange="uploadAttachments(event,'${taskId}')">
+      </label>
     </div>
 
     <div id="tab-panel-comments" class="task-tab-panel">
@@ -945,10 +956,13 @@ async function saveMembers() {
 
 function switchTaskTab(tab, taskId) {
   document.getElementById('tab-panel-comments').classList.toggle('hidden', tab !== 'comments')
+  document.getElementById('tab-panel-files').classList.toggle('hidden', tab !== 'files')
   document.getElementById('tab-panel-history').classList.toggle('hidden', tab !== 'history')
   document.getElementById('tab-btn-comments').classList.toggle('active', tab === 'comments')
+  document.getElementById('tab-btn-files').classList.toggle('active', tab === 'files')
   document.getElementById('tab-btn-history').classList.toggle('active', tab === 'history')
   if (tab === 'history') loadActivityLog(taskId)
+  if (tab === 'files') loadAttachments(taskId)
 }
 
 async function loadActivityLog(taskId) {
@@ -1070,6 +1084,134 @@ function clearBulkSelection() {
   selectedTaskIds.clear()
   document.querySelectorAll('.task-cb').forEach(cb => cb.checked = false)
   updateBulkBar()
+}
+
+// ── Přílohy ───────────────────────────────────────────────────
+
+const ATTACH_BUCKET = 'task-attachments'
+const ATTACH_MAX_MB = 20
+
+async function loadAttachments(taskId) {
+  const list = document.getElementById('attach-list')
+  if (!list) return
+  list.innerHTML = '<p class="text-muted" style="font-size:13px">Načítám…</p>'
+
+  const { data, error } = await db
+    .from('task_attachments')
+    .select('*, uploader:uploaded_by(name)')
+    .eq('task_id', taskId)
+    .order('created_at', { ascending: true })
+
+  if (error) { list.innerHTML = '<p class="text-muted">Chyba načítání příloh.</p>'; return }
+  list.innerHTML = (data || []).map(renderAttachItem).join('') || '<p class="text-muted" style="font-size:13px">Zatím žádné přílohy.</p>'
+}
+
+function renderAttachItem(a) {
+  const icon = attachIcon(a.mime_type)
+  const size = a.file_size ? formatFileSize(a.file_size) : ''
+  const canDel = currentProfile && (a.uploaded_by === currentProfile.id || isAdmin())
+  const { data: { publicUrl } } = db.storage.from(ATTACH_BUCKET).getPublicUrl(a.file_path)
+
+  return `
+    <div class="attach-item">
+      <span class="attach-icon">${icon}</span>
+      <div class="attach-info">
+        <div class="attach-name" title="${esc(a.file_name)}">${esc(a.file_name)}</div>
+        <div class="attach-meta">${esc(a.uploader?.name || '?')} · ${formatDate(a.created_at)}${size ? ' · ' + size : ''}</div>
+      </div>
+      <div class="attach-actions">
+        <a href="${publicUrl}" target="_blank" download="${esc(a.file_name)}" class="btn btn-sm btn-secondary" title="Stáhnout">⬇</a>
+        ${canDel ? `<button class="btn btn-sm btn-danger" onclick="deleteAttachment('${a.id}','${a.file_path}','${a.task_id}')" title="Smazat">✕</button>` : ''}
+      </div>
+    </div>`
+}
+
+function attachIcon(mime) {
+  if (!mime) return '📄'
+  if (mime.startsWith('image/')) return '🖼️'
+  if (mime === 'application/pdf') return '📕'
+  if (mime.includes('dwg') || mime.includes('autocad')) return '📐'
+  if (mime.includes('zip') || mime.includes('rar') || mime.includes('7z')) return '🗜️'
+  if (mime.includes('word') || mime.includes('document')) return '📝'
+  if (mime.includes('excel') || mime.includes('spreadsheet')) return '📊'
+  return '📄'
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+async function uploadAttachments(event, taskId) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  await processAttachFiles(files, taskId)
+}
+
+function attachDragOver(event) {
+  event.preventDefault()
+  document.getElementById('attach-drop-zone')?.classList.add('drag-active')
+}
+
+function attachDragLeave(event) {
+  document.getElementById('attach-drop-zone')?.classList.remove('drag-active')
+}
+
+async function attachDrop(event, taskId) {
+  event.preventDefault()
+  document.getElementById('attach-drop-zone')?.classList.remove('drag-active')
+  const files = Array.from(event.dataTransfer.files || [])
+  await processAttachFiles(files, taskId)
+}
+
+async function processAttachFiles(files, taskId) {
+  if (!files.length) return
+  const tooBig = files.filter(f => f.size > ATTACH_MAX_MB * 1024 * 1024)
+  if (tooBig.length) {
+    showError(`Soubor ${tooBig[0].name} je větší než ${ATTACH_MAX_MB} MB.`)
+    return
+  }
+
+  showToast('Nahrávám…')
+  const uploads = files.map(file => uploadSingleAttachment(file, taskId))
+  const results = await Promise.all(uploads)
+  if (results.some(r => r === false)) showError('Některé soubory se nepodařilo nahrát.')
+  else showToast('Nahráno.')
+  await loadAttachments(taskId)
+}
+
+async function uploadSingleAttachment(file, taskId) {
+  const ext      = file.name.includes('.') ? '.' + file.name.split('.').pop() : ''
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+  const path     = `${taskId}/${Date.now()}-${safeName}`
+
+  const { error: storageErr } = await db.storage.from(ATTACH_BUCKET).upload(path, file)
+  if (storageErr) { showError(storageErr.message); return false }
+
+  const { error: dbErr } = await db.from('task_attachments').insert({
+    task_id:     taskId,
+    uploaded_by: currentProfile.id,
+    file_name:   file.name,
+    file_path:   path,
+    file_size:   file.size,
+    mime_type:   file.type || null,
+  })
+  if (dbErr) {
+    await db.storage.from(ATTACH_BUCKET).remove([path])
+    showError(dbErr.message)
+    return false
+  }
+  return true
+}
+
+async function deleteAttachment(attachId, filePath, taskId) {
+  if (!await confirmDialog('Smazat přílohu?', { confirmLabel: 'Smazat', danger: true })) return
+  await db.storage.from(ATTACH_BUCKET).remove([filePath])
+  const { error } = await db.from('task_attachments').delete().eq('id', attachId)
+  if (error) { showError(error.message); return }
+  showToast('Příloha smazána.')
+  await loadAttachments(taskId)
 }
 
 // ── Drag & drop řazení ────────────────────────────────────────

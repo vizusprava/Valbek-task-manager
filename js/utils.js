@@ -121,19 +121,20 @@ function renderNav(activePage) {
     </a>` : ''
 
   return `
-    <nav class="navbar">
+    <nav class="navbar" id="main-navbar">
       <div class="nav-brand">
         <img src="img/logo.png" alt="Valbek" class="nav-logo">
         <span class="nav-brand-text">VIZUALIZACE</span>
       </div>
-      <div class="nav-links">
-        <a href="dashboard.html" class="${activePage === 'dashboard' ? 'active' : ''}">Projekty</a>
-        <a href="my-tasks.html"  class="${activePage === 'my-tasks'  ? 'active' : ''}">Moje úkoly</a>
-        <a href="3dmax.html"    class="${activePage === '3dmax'     ? 'active' : ''}">3DMax</a>
+      <div class="nav-links" id="nav-links">
+        <a href="dashboard.html" class="${activePage === 'dashboard' ? 'active' : ''}" onclick="closeMobileNav()">Projekty</a>
+        <a href="my-tasks.html"  class="${activePage === 'my-tasks'  ? 'active' : ''}" onclick="closeMobileNav()">Moje úkoly</a>
+        <a href="3dmax.html"    class="${activePage === '3dmax'     ? 'active' : ''}" onclick="closeMobileNav()">3DMax</a>
         ${reviewLink}
         ${adminItems}
       </div>
       <div class="nav-user">
+        <button class="hamburger-btn" id="hamburger-btn" onclick="toggleMobileNav()" title="Menu">☰</button>
         <button class="notif-btn" id="theme-btn" onclick="toggleDarkMode()" title="${isDark ? 'Světlý režim' : 'Tmavý režim'}">${isDark ? '☀️' : '🌙'}</button>
         <button class="notif-btn" id="notif-btn" onclick="toggleNotifDropdown()" title="Upozornění">
           🔔<span id="notif-badge" class="nav-badge hidden"></span>
@@ -159,6 +160,27 @@ async function updateReviewBadge() {
   } else {
     badge.classList.add('hidden')
   }
+}
+
+// ── Hamburger menu ────────────────────────────────────────────
+
+function toggleMobileNav() {
+  const nav = document.getElementById('main-navbar')
+  const open = nav?.classList.toggle('nav-mobile-open')
+  if (open) {
+    setTimeout(() => document.addEventListener('click', _mobileNavOutside), 10)
+  } else {
+    document.removeEventListener('click', _mobileNavOutside)
+  }
+}
+
+function closeMobileNav() {
+  document.getElementById('main-navbar')?.classList.remove('nav-mobile-open')
+  document.removeEventListener('click', _mobileNavOutside)
+}
+
+function _mobileNavOutside(e) {
+  if (!document.getElementById('main-navbar')?.contains(e.target)) closeMobileNav()
 }
 
 function initReviewBadge() {
