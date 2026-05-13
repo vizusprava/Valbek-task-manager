@@ -54,10 +54,30 @@
 [data-theme="dark"] .activity-item { background: #162032; }
 [data-theme="dark"] .comment { background: #162032; }
 [data-theme="dark"] kbd { background: #263548; border-color: var(--border); color: var(--text); }
-[data-theme="dark"] .badge { filter: brightness(.9); }
 [data-theme="dark"] .bulk-action-bar select { background: #263548; color: var(--text); }
 [data-theme="dark"] .inline-select,
 [data-theme="dark"] .inline-date { background: #263548; color: var(--text); border-color: var(--border); }
+
+/* Projektové karty */
+[data-theme="dark"] .project-card-done             { background: #14532d; border-color: #166534; }
+[data-theme="dark"] .project-card-done:hover        { background: #166534; border-color: #15803d; }
+[data-theme="dark"] .project-card-overdue           { background: #450a0a; border-color: #7f1d1d; }
+[data-theme="dark"] .project-card-overdue:hover     { background: #7f1d1d; border-color: #991b1b; }
+
+/* Odznaky stavu */
+[data-theme="dark"] .status-todo       { background: #374151; color: #D1D5DB; }
+[data-theme="dark"] .status-inprogress { background: #1e3a5f; color: #93C5FD; }
+[data-theme="dark"] .status-review     { background: #3d2e00; color: #FCD34D; }
+[data-theme="dark"] .status-done       { background: #14532d; color: #86EFAC; }
+
+/* Odznaky priority */
+[data-theme="dark"] .priority-low    { background: #374151; color: #9CA3AF; }
+[data-theme="dark"] .priority-medium { background: #3d2e00; color: #FBBF24; }
+[data-theme="dark"] .priority-high   { background: #450a0a; color: #FCA5A5; }
+
+/* Řádky tabulky po termínu */
+[data-theme="dark"] .task-row.overdue { background: #2d1010; }
+[data-theme="dark"] .task-row.overdue:hover { background: #3d1515; }
 
 body {
   font-family: var(--font);
