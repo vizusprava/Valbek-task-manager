@@ -6,6 +6,7 @@
   <title>Moje úkoly – TaskManager</title>
   <link rel="icon" href="img/logo.png">
   <link rel="stylesheet" href="css/styles.css">
+  <script>if(localStorage.getItem('valbek-theme')==='dark')document.documentElement.setAttribute('data-theme','dark')</script>
 </head>
 <body>
 
@@ -24,6 +25,12 @@
         <option value="rozpracováno">Rozpracováno</option>
         <option value="připraveno ke kontrole">Ke kontrole</option>
         <option value="hotovo">Hotovo</option>
+      </select>
+      <select id="filter-priority" class="filter-select">
+        <option value="">Všechny priority</option>
+        <option value="high">Vysoká</option>
+        <option value="medium">Střední</option>
+        <option value="low">Nízká</option>
       </select>
       <button class="btn btn-sm btn-secondary" onclick="clearFilters()">Zrušit filtry</button>
     </div>

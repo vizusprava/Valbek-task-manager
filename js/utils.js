@@ -109,7 +109,8 @@ function setLoading(btn, loading) {
 // ── Navigace ──────────────────────────────────────────────────
 
 function renderNav(activePage) {
-  const name = currentProfile?.name || ''
+  const name    = currentProfile?.name || ''
+  const isDark  = document.documentElement.getAttribute('data-theme') === 'dark'
   const adminItems = isAdmin()
     ? `<button class="btn-link" onclick="navCreateProject()">+ Nový projekt</button>
        <button class="btn-link" onclick="openCreateUser()">+ Nový uživatel</button>`
@@ -132,6 +133,7 @@ function renderNav(activePage) {
         ${adminItems}
       </div>
       <div class="nav-user">
+        <button class="notif-btn" id="theme-btn" onclick="toggleDarkMode()" title="${isDark ? 'Světlý režim' : 'Tmavý režim'}">${isDark ? '☀️' : '🌙'}</button>
         <button class="notif-btn" id="notif-btn" onclick="toggleNotifDropdown()" title="Upozornění">
           🔔<span id="notif-badge" class="nav-badge hidden"></span>
         </button>
@@ -438,6 +440,34 @@ function initNotifications() {
     }, () => loadNotifications())
     .subscribe()
 }
+
+// ── Tmavý režim ──────────────────────────────────────────────
+
+function initTheme() {
+  if (localStorage.getItem('valbek-theme') === 'dark') {
+    document.documentElement.setAttribute('data-theme', 'dark')
+  }
+}
+
+function toggleDarkMode() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
+  if (isDark) {
+    document.documentElement.removeAttribute('data-theme')
+    localStorage.removeItem('valbek-theme')
+  } else {
+    document.documentElement.setAttribute('data-theme', 'dark')
+    localStorage.setItem('valbek-theme', 'dark')
+  }
+  const btn = document.getElementById('theme-btn')
+  if (btn) {
+    const nowDark = !isDark
+    btn.textContent = nowDark ? '☀️' : '🌙'
+    btn.title = nowDark ? 'Světlý režim' : 'Tmavý režim'
+  }
+}
+
+// Aplikovat téma co nejdříve (před renderem stránky)
+initTheme()
 
 // ── Profil ────────────────────────────────────────────────────
 

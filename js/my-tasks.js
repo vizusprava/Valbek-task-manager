@@ -11,6 +11,7 @@ async function init() {
 
   await loadMyTasks()
   document.getElementById('filter-status').addEventListener('change', applyFilters)
+  document.getElementById('filter-priority').addEventListener('change', applyFilters)
   document.getElementById('search-tasks').addEventListener('input', debounce(applyFilters, 300))
 
   // Realtime: překreslit při změně mých úkolů
@@ -39,12 +40,14 @@ async function loadMyTasks() {
 }
 
 function applyFilters() {
-  const filterStatus = document.getElementById('filter-status').value
-  const search       = document.getElementById('search-tasks').value.toLowerCase().trim()
+  const filterStatus   = document.getElementById('filter-status').value
+  const filterPriority = document.getElementById('filter-priority').value
+  const search         = document.getElementById('search-tasks').value.toLowerCase().trim()
 
   let filtered = allMyTasks
-  if (filterStatus) filtered = filtered.filter(t => t.status === filterStatus)
-  if (search)       filtered = filtered.filter(t =>
+  if (filterStatus)   filtered = filtered.filter(t => t.status === filterStatus)
+  if (filterPriority) filtered = filtered.filter(t => t.priority === filterPriority)
+  if (search)         filtered = filtered.filter(t =>
     t.title.toLowerCase().includes(search) ||
     (t.description || '').toLowerCase().includes(search) ||
     (t.project?.name || '').toLowerCase().includes(search)
@@ -54,8 +57,9 @@ function applyFilters() {
 }
 
 function clearFilters() {
-  document.getElementById('filter-status').value = ''
-  document.getElementById('search-tasks').value  = ''
+  document.getElementById('filter-status').value   = ''
+  document.getElementById('filter-priority').value = ''
+  document.getElementById('search-tasks').value    = ''
   applyFilters()
 }
 
