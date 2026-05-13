@@ -1512,6 +1512,90 @@ input:focus, select:focus, textarea:focus {
 .drag-handle:hover { opacity: 1; }
 .drag-handle:active { cursor: grabbing; }
 
+/* ──────────────────────────────────────────────────────────────
+   REFERENČNÍ STRÁNKA (3DMax)
+────────────────────────────────────────────────────────────── */
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.reference-section {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+
+.reference-section h3 {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 12px;
+}
+
+.ref-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 8px;
+}
+
+.ref-table th {
+  text-align: left;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 2px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.ref-table td {
+  padding: 5px 6px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.ref-table tr:last-child td { border-bottom: none; }
+
+.ref-code {
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  color: var(--brand);
+  white-space: nowrap;
+  width: 52px;
+}
+
+.ref-id {
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-align: right;
+  white-space: nowrap;
+  width: 48px;
+}
+
+.editable-ref { cursor: text; transition: background .12s; }
+.editable-ref:hover { background: var(--brand-light); }
+
+.ref-del {
+  width: 24px;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.ref-table tr:hover .ref-del { opacity: 1; }
+
+@media (max-width: 900px) {
+  .reference-grid { grid-template-columns: 1fr; }
+}
+
 .task-row.dragging { opacity: 0.35; background: var(--brand-light); }
 .task-row.drag-over { outline: 2px solid var(--brand); outline-offset: -2px; }
 

@@ -259,7 +259,76 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS sort_order BIGINT DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_tasks_sort_order ON tasks(project_id, sort_order);
 
 -- ────────────────────────────────────────────────────────────
--- 8. REALTIME – povolit pro tabulky
+-- 8. REFERENCE DATA (3DMax struktura)
+-- ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS reference_items (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  page       TEXT NOT NULL DEFAULT '3dmax',
+  section    TEXT NOT NULL,
+  code       TEXT,
+  name       TEXT NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_reference_items ON reference_items(page, section, sort_order);
+
+ALTER TABLE reference_items ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "ref_select" ON reference_items;
+CREATE POLICY "ref_select" ON reference_items
+  FOR SELECT TO authenticated USING (true);
+
+DROP POLICY IF EXISTS "ref_admin" ON reference_items;
+CREATE POLICY "ref_admin" ON reference_items
+  FOR ALL TO authenticated USING (is_admin()) WITH CHECK (is_admin());
+
+-- Seed: Hladiny
+INSERT INTO reference_items (page, section, code, name, sort_order) VALUES
+  ('3dmax', 'layers', '000', 'help',     0),
+  ('3dmax', 'layers', '001', 'lights',   10),
+  ('3dmax', 'layers', '002', 'cams',     20),
+  ('3dmax', 'layers', '003', 'model',    30),
+  ('3dmax', 'layers', '004', 'okoli',    40),
+  ('3dmax', 'layers', '005', 'staff',    50),
+  ('3dmax', 'layers', '006', 'vegetace', 60),
+  ('3dmax', 'layers', '007', 'masky',    70)
+ON CONFLICT DO NOTHING;
+
+-- Seed: Model kategorie (patří pod 003)
+INSERT INTO reference_items (page, section, code, name, sort_order) VALUES
+  ('3dmax', 'model_subs', '100', 'komunikace', 0),
+  ('3dmax', 'model_subs', '200', 'mosty',      10),
+  ('3dmax', 'model_subs', '300', 'voda',       20),
+  ('3dmax', 'model_subs', '400', 'koleje',     30),
+  ('3dmax', 'model_subs', '500', 'tunel',      40),
+  ('3dmax', 'model_subs', '600', 'budovy',     50),
+  ('3dmax', 'model_subs', '700', 'zdi',        60)
+ON CONFLICT DO NOTHING;
+
+-- Seed: Object IDs (pro compositing v After Effects)
+INSERT INTO reference_items (page, section, code, name, sort_order) VALUES
+  ('3dmax', 'object_ids', '101', 'asfalt',             0),
+  ('3dmax', 'object_ids', '102', 'krajnice',           10),
+  ('3dmax', 'object_ids', '103', 'chodníky',           20),
+  ('3dmax', 'object_ids', '104', 'navazující silnice',  25),
+  ('3dmax', 'object_ids', '201', 'betony',             30),
+  ('3dmax', 'object_ids', '401', 'kolejiště',          40),
+  ('3dmax', 'object_ids', '402', 'kolejové lože',      50),
+  ('3dmax', 'object_ids', '403', 'žlaby',              60),
+  ('3dmax', 'object_ids', '701', 'PHS',                70),
+  ('3dmax', 'object_ids', '801', 'tráva',              80),
+  ('3dmax', 'object_ids', '802', 'keře',               90),
+  ('3dmax', 'object_ids', '803', 'stromy - dub',       100),
+  ('3dmax', 'object_ids', '804', 'stromy - jeřabina',  110),
+  ('3dmax', 'object_ids', '805', 'stromy - javory',    120),
+  ('3dmax', 'object_ids', '806', 'stromy - lípa',      130),
+  ('3dmax', 'object_ids', '807', 'stromy - střemcha',  140)
+ON CONFLICT DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────
+-- 9. REALTIME – povolit pro tabulky
 -- ────────────────────────────────────────────────────────────
 -- Spustit ručně v Supabase Dashboard:
 -- Database > Replication > zapnout pro: projects, project_members, tasks, comments, notifications

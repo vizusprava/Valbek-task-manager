@@ -129,6 +129,7 @@ function renderNav(activePage) {
       <div class="nav-links">
         <a href="dashboard.html" class="${activePage === 'dashboard' ? 'active' : ''}">Projekty</a>
         <a href="my-tasks.html"  class="${activePage === 'my-tasks'  ? 'active' : ''}">Moje úkoly</a>
+        <a href="3dmax.html"    class="${activePage === '3dmax'     ? 'active' : ''}">3DMax</a>
         ${reviewLink}
         ${adminItems}
       </div>

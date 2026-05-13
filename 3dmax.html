@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Struktura 3Ds Max – TaskManager</title>
+  <link rel="icon" href="img/logo.png">
+  <link rel="stylesheet" href="css/styles.css">
+  <script>if(localStorage.getItem('valbek-theme')==='dark')document.documentElement.setAttribute('data-theme','dark')</script>
+</head>
+<body>
+
+  <div id="nav-placeholder"></div>
+
+  <main class="container">
+    <div class="page-header">
+      <div>
+        <h2>Struktura 3Ds Max</h2>
+        <p class="text-muted" style="margin-top:4px">Hladiny, modelové kategorie a Object ID pro compositing v After Effects</p>
+      </div>
+    </div>
+
+    <div id="reference-container">
+      <div class="loading-state">Načítám…</div>
+    </div>
+  </main>
+
+  <div id="modal-overlay" class="modal-overlay"></div>
+
+  <script src="js/supabase.min.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/3dmax.js"></script>
+</body>
+</html>
