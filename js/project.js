@@ -90,6 +90,7 @@ async function loadProjectData() {
     </div>
     ${isAdmin() ? `
       <div class="members-actions">
+        <button class="btn btn-sm btn-secondary" onclick="openEditProject()">Upravit projekt</button>
         <button class="btn btn-sm btn-secondary" onclick="openManageSubprojects()">Spravovat podprojekty</button>
         <button class="btn btn-sm btn-secondary" onclick="openManageMembers()">Spravovat členy</button>
         ${!isDone ? `<button class="btn btn-sm btn-primary" onclick="openCreateTask()">+ Přidat úkol</button>` : ''}
@@ -1053,6 +1054,87 @@ async function saveProjectFilePath(projId) {
 
 // ── Správa členů (admin) ──────────────────────────────────────
 
+async function openEditProject() {
+  if (!isAdmin()) return
+  const { data: allProfiles } = await db.from('profiles').select('*').order('name')
+  const memberIds = projectMembers.map(m => m.id)
+  const proj = projectData
+
+  openModal(`
+    <div class="modal-header">
+      <h2>Upravit projekt</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form id="edit-project-form">
+      <div class="form-group">
+        <label>Název projektu</label>
+        <input type="text" id="ep-name" required value="${esc(proj.name)}">
+      </div>
+      <div class="form-group">
+        <label>Popis (volitelný)</label>
+        <textarea id="ep-desc" rows="3">${esc(proj.description || '')}</textarea>
+      </div>
+      <div class="form-group">
+        <label>Termín projektu (volitelný)</label>
+        <input type="date" id="ep-due" value="${proj.due_date || ''}">
+      </div>
+      <div class="form-group">
+        <label>Cesta k souboru (volitelná)</label>
+        <input type="text" id="ep-filepath" value="${esc(proj.file_path || '')}" placeholder="\\\\server\\share\\projekt">
+      </div>
+      <div class="form-group">
+        <label>Členové projektu</label>
+        <div class="checkbox-group">
+          ${(allProfiles || []).map(p => `
+            <label class="checkbox-label">
+              <input type="checkbox" name="ep-member" value="${p.id}"
+                ${memberIds.includes(p.id) ? 'checked' : ''}>
+              ${esc(p.name)} ${p.role === 'admin' ? '<span class="role-badge">admin</span>' : ''}
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <div id="ep-error" class="form-error hidden"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Zrušit</button>
+        <button type="button" class="btn btn-primary" onclick="saveEditProject()">Uložit změny</button>
+      </div>
+    </form>
+  `)
+}
+
+async function saveEditProject() {
+  const errEl = document.getElementById('ep-error')
+  errEl.classList.add('hidden')
+  const name = document.getElementById('ep-name')?.value.trim()
+  if (!name) { errEl.textContent = 'Název projektu nesmí být prázdný.'; errEl.classList.remove('hidden'); return }
+  const desc     = document.getElementById('ep-desc')?.value.trim()
+  const due      = document.getElementById('ep-due')?.value || null
+  const filepath = document.getElementById('ep-filepath')?.value.trim() || null
+  const memberIds = Array.from(document.querySelectorAll('input[name="ep-member"]:checked')).map(c => c.value)
+
+  const { error: projErr } = await db.from('projects').update({
+    name,
+    description: desc || null,
+    due_date: due,
+    file_path: filepath,
+  }).eq('id', projectId)
+  if (projErr) { errEl.textContent = projErr.message; errEl.classList.remove('hidden'); return }
+
+  const { error: delErr } = await db.from('project_members').delete().eq('project_id', projectId)
+  if (delErr) { errEl.textContent = delErr.message; errEl.classList.remove('hidden'); return }
+  if (memberIds.length > 0) {
+    const rows = memberIds.map(uid => ({ project_id: projectId, user_id: uid }))
+    const { error: memErr } = await db.from('project_members').insert(rows)
+    if (memErr) { errEl.textContent = memErr.message; errEl.classList.remove('hidden'); return }
+  }
+
+  showToast('Projekt uložen.')
+  closeModal()
+  await loadProjectData()
+  await renderTasks()
+}
+
 async function openManageMembers() {
   const { data: allProfiles } = await db.from('profiles').select('*').order('name')
   const memberIds = projectMembers.map(m => m.id)
@@ -1104,8 +1186,22 @@ async function saveMembers() {
 
 async function openManageSubprojects() {
   if (!isAdmin()) return
-  // znovu načti — abychom měli čerstvý stav
   await loadProjectSubprojects()
+
+  const [refRes, tplRes] = await Promise.all([
+    db.from('reference_items').select('id, code, name, sort_order')
+      .eq('page', '3dmax').eq('section', 'model_subs').order('sort_order'),
+    db.from('subproject_templates').select('id, name, sort_order').order('sort_order')
+  ])
+  const refItems = refRes.data || []
+  const tplItems = tplRes.data || []
+  const existingNames = new Set(projectSubprojects.map(s => s.name.toLowerCase()))
+
+  const availableRef = refItems.filter(r => {
+    const combined = (r.code ? r.code + ' ' : '') + r.name
+    return !existingNames.has(combined.toLowerCase())
+  })
+  const availableTpl = tplItems.filter(t => !existingNames.has(t.name.toLowerCase()))
 
   openModal(`
     <div class="modal-header">
@@ -1120,8 +1216,39 @@ async function openManageSubprojects() {
         : '<p class="text-muted" style="margin:6px 0">Zatím žádné podprojekty.</p>'}
     </div>
 
+    ${availableRef.length ? `
+      <div class="subproj-tpl-group" style="margin-top:14px">
+        <div class="subproj-tpl-title">Z 3DMax kategorií</div>
+        <div class="checkbox-group checkbox-group-compact">
+          ${availableRef.map(r => {
+            const combined = (r.code ? r.code + ' ' : '') + r.name
+            return `<label class="checkbox-label">
+              <input type="checkbox" name="sp-tpl-ref" value="${esc(combined)}">
+              ${esc(combined)}
+            </label>`
+          }).join('')}
+        </div>
+      </div>` : ''}
+
+    ${availableTpl.length ? `
+      <div class="subproj-tpl-group" style="margin-top:14px">
+        <div class="subproj-tpl-title">Vlastní šablony</div>
+        <div class="checkbox-group checkbox-group-compact">
+          ${availableTpl.map(t => `
+            <label class="checkbox-label">
+              <input type="checkbox" name="sp-tpl-custom" value="${esc(t.name)}">
+              ${esc(t.name)}
+            </label>
+          `).join('')}
+        </div>
+      </div>` : ''}
+
+    ${availableRef.length || availableTpl.length ? `
+      <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px" onclick="addSubprojectsFromTemplates()">+ Přidat vybrané</button>
+    ` : ''}
+
     <div class="subproj-add-row" style="margin-top:12px">
-      <input type="text" id="sp-new-name" placeholder="Název nového podprojektu…"
+      <input type="text" id="sp-new-name" placeholder="Název vlastního podprojektu…"
              onkeydown="if(event.key==='Enter'){event.preventDefault();addSubproject()}">
       <button type="button" class="btn btn-sm btn-secondary" onclick="addSubproject()">+ Přidat</button>
     </div>
@@ -1132,6 +1259,31 @@ async function openManageSubprojects() {
       <button class="btn btn-primary" onclick="saveSubprojects()">Uložit změny</button>
     </div>
   `)
+}
+
+async function addSubprojectsFromTemplates() {
+  const errEl = document.getElementById('sp-error')
+  errEl.classList.add('hidden')
+  const names = [
+    ...Array.from(document.querySelectorAll('input[name="sp-tpl-ref"]:checked')).map(cb => cb.value),
+    ...Array.from(document.querySelectorAll('input[name="sp-tpl-custom"]:checked')).map(cb => cb.value),
+  ]
+  if (!names.length) return
+  const existing = new Set(projectSubprojects.map(s => s.name.toLowerCase()))
+  const toAdd = names.filter(n => !existing.has(n.toLowerCase()))
+  if (!toAdd.length) return
+  const nextOrder = projectSubprojects.length * 10
+  const rows = toAdd.map((name, i) => ({
+    project_id: projectId,
+    name,
+    sort_order: nextOrder + i * 10,
+    created_by: currentProfile.id,
+  }))
+  const { error } = await db.from('subprojects').insert(rows)
+  if (error) { errEl.textContent = error.message; errEl.classList.remove('hidden'); return }
+  const cnt = toAdd.length
+  showToast(`Přidáno ${cnt} podprojekt${cnt === 1 ? '' : cnt < 5 ? 'y' : 'ů'}.`)
+  openManageSubprojects()
 }
 
 function renderSubprojectRow(sp, idx) {
