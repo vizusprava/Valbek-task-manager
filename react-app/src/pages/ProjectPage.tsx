@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip, X } from 'lucide-react'
+import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip, X, MoreHorizontal, CheckCircle } from 'lucide-react'
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
   type DragEndEvent,
@@ -1078,7 +1078,18 @@ export function ProjectPage() {
   const [selectedTaskIds,   setSelectedTaskIds]   = useState<Set<string>>(new Set())
   const [showTemplatesModal, setShowTemplatesModal] = useState(false)
   const [showBulkCreate,    setShowBulkCreate]    = useState(false)
+  const [showAdminMenu,     setShowAdminMenu]     = useState(false)
   const lastSelectedId = useRef<string | null>(null)
+  const adminMenuRef   = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!showAdminMenu) return
+    function handler(e: MouseEvent) {
+      if (adminMenuRef.current && !adminMenuRef.current.contains(e.target as Node)) setShowAdminMenu(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showAdminMenu])
 
   // ── Data queries ───────────────────────────────────────────
 
@@ -1238,20 +1249,22 @@ export function ProjectPage() {
 
   async function handleBulkStatus(status: TaskStatus) {
     await supabase.from('tasks').update({ status, updated_by: profile!.id }).in('id', Array.from(selectedTaskIds))
-    setSelectedTaskIds(new Set())
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
   async function handleBulkPriority(priority: TaskPriority) {
     await supabase.from('tasks').update({ priority, updated_by: profile!.id }).in('id', Array.from(selectedTaskIds))
-    setSelectedTaskIds(new Set())
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
   async function handleBulkAssign(userId: string) {
+    const taskIds = Array.from(selectedTaskIds)
     const assigned_to = userId === '__unassign__' ? null : userId
-    await supabase.from('tasks').update({ assigned_to, updated_by: profile!.id }).in('id', Array.from(selectedTaskIds))
-    setSelectedTaskIds(new Set())
+    await supabase.from('tasks').update({ assigned_to, updated_by: profile!.id }).in('id', taskIds)
+    await supabase.from('task_assignees').delete().in('task_id', taskIds)
+    if (assigned_to) {
+      await supabase.from('task_assignees').insert(taskIds.map(id => ({ task_id: id, user_id: assigned_to })))
+    }
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
@@ -1340,18 +1353,6 @@ export function ProjectPage() {
             <div className="flex -space-x-1">
               {members.map(m => <Avatar key={m.id} name={m.name} initials={m.initials} color={m.color} small />)}
             </div>
-            {admin && (
-              <>
-                <Button size="sm" variant="secondary" onClick={() => setShowEditProject(true)}>Upravit projekt</Button>
-                <Button size="sm" variant="secondary" onClick={() => setShowManageSubprojects(true)}>
-                  <Settings size={14} /> Podprojekty
-                </Button>
-                <Button size="sm" variant={isDone ? 'secondary' : 'danger'} onClick={handleToggleStatus}>
-                  {isDone ? 'Znovu otevřít' : 'Dokončit projekt'}
-                </Button>
-                <Button size="sm" variant="danger" onClick={handleDeleteProject}>Smazat</Button>
-              </>
-            )}
             {!isDone && (
               <>
                 <Button size="sm" variant="primary" onClick={() => { setCreateSubId(''); setShowCreate(true) }}>
@@ -1363,6 +1364,40 @@ export function ProjectPage() {
                   </Button>
                 )}
               </>
+            )}
+            {admin && (
+              <div className="relative" ref={adminMenuRef}>
+                <button
+                  onClick={() => setShowAdminMenu(m => !m)}
+                  className={`flex items-center justify-center w-8 h-8 rounded-md border text-sm transition-colors
+                    ${showAdminMenu
+                      ? 'border-gray-400 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200'
+                      : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:border-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+                {showAdminMenu && (
+                  <div className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl z-30 min-w-[190px] overflow-hidden py-1">
+                    <button onClick={() => { setShowEditProject(true); setShowAdminMenu(false) }}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 flex items-center gap-2.5">
+                      <Settings size={14} className="shrink-0" /> Upravit projekt
+                    </button>
+                    <button onClick={() => { setShowManageSubprojects(true); setShowAdminMenu(false) }}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 flex items-center gap-2.5">
+                      <ChevronRight size={14} className="shrink-0" /> Podprojekty
+                    </button>
+                    <div className="my-1 border-t border-gray-100 dark:border-gray-800" />
+                    <button onClick={() => { handleToggleStatus(); setShowAdminMenu(false) }}
+                      className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2.5 ${isDone ? 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800' : 'text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'}`}>
+                      <CheckCircle size={14} className="shrink-0" /> {isDone ? 'Znovu otevřít' : 'Dokončit projekt'}
+                    </button>
+                    <button onClick={() => { handleDeleteProject(); setShowAdminMenu(false) }}
+                      className="w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2.5">
+                      <Trash2 size={14} className="shrink-0" /> Smazat projekt
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
