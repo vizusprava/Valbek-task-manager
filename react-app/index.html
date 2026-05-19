@@ -10,6 +10,9 @@
           (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
         document.documentElement.classList.add('dark')
       }
+      // GitHub Pages SPA redirect
+      var p = new URLSearchParams(window.location.search).get('p');
+      if (p) { window.history.replaceState(null, null, '/' + decodeURIComponent(p)); }
     </script>
   </head>
   <body>
