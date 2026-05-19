@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip } from 'lucide-react'
+import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip, X } from 'lucide-react'
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors,
   type DragEndEvent,
@@ -539,8 +539,10 @@ function CreateTaskModal({ open, onClose, projectId, subprojects, members, defau
 
 // ── Sortable Task Row ─────────────────────────────────────────
 
-function SortableTaskRow({ task, admin, canEdit, onOpen, onStatusChange, onPriorityChange, onDueDateChange }: {
+function SortableTaskRow({ task, admin, canEdit, selected, anySelected, onToggleSelect, onOpen, onStatusChange, onPriorityChange, onDueDateChange }: {
   task: TaskWithRelations; admin: boolean; canEdit: boolean
+  selected: boolean; anySelected: boolean
+  onToggleSelect: (id: string) => void
   onOpen: () => void
   onStatusChange: (taskId: string, val: TaskStatus) => void
   onPriorityChange: (taskId: string, val: TaskPriority) => void
@@ -553,15 +555,23 @@ function SortableTaskRow({ task, admin, canEdit, onOpen, onStatusChange, onPrior
 
   return (
     <tr ref={setNodeRef} style={style} onClick={onOpen}
-      className={`border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer
-        ${task.status === 'hotovo' ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20' : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}
+      className={`group border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer
+        ${selected ? 'bg-indigo-50 dark:bg-indigo-900/20' : task.status === 'hotovo' ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20' : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}
         ${isDragging ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}>
-      <td className="pl-2 pr-1 py-2.5 w-8" onClick={e => e.stopPropagation()}>
-        {admin && (
-          <span {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 flex items-center justify-center">
-            <GripVertical size={16} />
-          </span>
-        )}
+      <td className="pl-2 pr-1 py-2.5 w-8" onClick={e => { e.stopPropagation(); onToggleSelect(task.id) }}>
+        <div className="relative flex items-center justify-center w-4 h-4 mx-auto">
+          {admin && !anySelected && (
+            <span {...attributes} {...listeners}
+              onClick={e => e.stopPropagation()}
+              className="absolute inset-0 flex items-center justify-center cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 group-hover:opacity-0 transition-opacity select-none">
+              <GripVertical size={16} />
+            </span>
+          )}
+          <input type="checkbox" checked={selected} onChange={() => onToggleSelect(task.id)}
+            onClick={e => e.stopPropagation()}
+            className={`absolute w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500 cursor-pointer transition-opacity
+              ${selected || anySelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
+        </div>
       </td>
       <td className="px-3 py-2.5">
         <div className="flex items-start gap-2">
@@ -618,9 +628,12 @@ function SortableTaskRow({ task, admin, canEdit, onOpen, onStatusChange, onPrior
 
 // ── Task Group ────────────────────────────────────────────────
 
-function TaskGroup({ group, admin, profile, onOpenTask, onCreateTask, onStatusChange, onPriorityChange, onDueDateChange, onDragEnd }: {
+function TaskGroup({ group, admin, profile, selectedTaskIds, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onStatusChange, onPriorityChange, onDueDateChange, onDragEnd }: {
   group: { id: string | null; name: string; tasks: TaskWithRelations[] }
   admin: boolean; profile: { id: string } | null
+  selectedTaskIds: Set<string>
+  onToggleSelect: (id: string) => void
+  onToggleGroup: (ids: string[]) => void
   onOpenTask: (task: TaskWithRelations) => void
   onCreateTask: (subprojectId: string) => void
   onStatusChange: (taskId: string, val: TaskStatus) => void
@@ -632,6 +645,9 @@ function TaskGroup({ group, admin, profile, onOpenTask, onCreateTask, onStatusCh
   const total = group.tasks.length
   const done  = group.tasks.filter(t => t.status === 'hotovo').length
   const pct   = total > 0 ? Math.round((done / total) * 100) : 0
+  const anySelected = selectedTaskIds.size > 0
+  const allGroupSelected = total > 0 && group.tasks.every(t => selectedTaskIds.has(t.id))
+  const someGroupSelected = !allGroupSelected && group.tasks.some(t => selectedTaskIds.has(t.id))
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -646,6 +662,12 @@ function TaskGroup({ group, admin, profile, onOpenTask, onCreateTask, onStatusCh
       {/* Group header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800 cursor-pointer select-none hover:bg-gray-50 dark:hover:bg-gray-800/50"
         onClick={() => setCollapsed(c => !c)}>
+        <div className="w-4 h-4 flex items-center justify-center shrink-0" onClick={e => { e.stopPropagation(); onToggleGroup(group.tasks.map(t => t.id)) }}>
+          <input type="checkbox" checked={allGroupSelected} ref={el => { if (el) el.indeterminate = someGroupSelected }}
+            onChange={() => onToggleGroup(group.tasks.map(t => t.id))}
+            onClick={e => e.stopPropagation()}
+            className={`w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500 cursor-pointer transition-opacity ${anySelected || allGroupSelected || someGroupSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
+        </div>
         <span className="text-gray-400">{collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}</span>
         <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-200 flex-1">{group.name}</h3>
         <span className="text-xs text-gray-400">{total} úkol{total === 1 ? '' : total < 5 ? 'y' : 'ů'}</span>
@@ -692,6 +714,9 @@ function TaskGroup({ group, admin, profile, onOpenTask, onCreateTask, onStatusCh
                     <SortableTaskRow key={task.id} task={task}
                       admin={admin}
                       canEdit={admin || task.assigned_to === profile?.id}
+                      selected={selectedTaskIds.has(task.id)}
+                      anySelected={anySelected}
+                      onToggleSelect={onToggleSelect}
                       onOpen={() => onOpenTask(task)}
                       onStatusChange={onStatusChange}
                       onPriorityChange={onPriorityChange}
@@ -978,6 +1003,7 @@ export function ProjectPage() {
   const [createSubId,     setCreateSubId]     = useState('')
   const [showEditProject,       setShowEditProject]       = useState(false)
   const [showManageSubprojects, setShowManageSubprojects] = useState(false)
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set())
 
   // ── Data queries ───────────────────────────────────────────
 
@@ -1099,6 +1125,58 @@ export function ProjectPage() {
     const updates = reordered.map((t, i) => supabase.from('tasks').update({ sort_order: (i + 1) * 10 }).eq('id', t.id))
     await Promise.all(updates)
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+  }
+
+  // ── Bulk actions ──────────────────────────────────────────
+
+  function toggleTaskSelection(id: string) {
+    setSelectedTaskIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function toggleGroupSelection(ids: string[]) {
+    setSelectedTaskIds(prev => {
+      const allIn = ids.every(id => prev.has(id))
+      const next = new Set(prev)
+      allIn ? ids.forEach(id => next.delete(id)) : ids.forEach(id => next.add(id))
+      return next
+    })
+  }
+
+  async function handleBulkStatus(status: TaskStatus) {
+    await supabase.from('tasks').update({ status, updated_by: profile!.id }).in('id', Array.from(selectedTaskIds))
+    setSelectedTaskIds(new Set())
+    queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+  }
+
+  async function handleBulkPriority(priority: TaskPriority) {
+    await supabase.from('tasks').update({ priority, updated_by: profile!.id }).in('id', Array.from(selectedTaskIds))
+    setSelectedTaskIds(new Set())
+    queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+  }
+
+  async function handleBulkAssign(userId: string) {
+    const assigned_to = userId === '__unassign__' ? null : userId
+    await supabase.from('tasks').update({ assigned_to, updated_by: profile!.id }).in('id', Array.from(selectedTaskIds))
+    setSelectedTaskIds(new Set())
+    queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+  }
+
+  async function handleBulkDelete() {
+    const count = selectedTaskIds.size
+    if (!await confirm({
+      title: 'Smazat úkoly',
+      message: `Opravdu smazat ${count} vybraných úkolů? Tato akce je nevratná.`,
+      confirmLabel: 'Smazat',
+      variant: 'danger',
+    })) return
+    await supabase.from('tasks').delete().in('id', Array.from(selectedTaskIds))
+    setSelectedTaskIds(new Set())
+    queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+    toast.success(`${count} úkolů smazáno.`)
   }
 
   // ── Project actions ────────────────────────────────────────
@@ -1230,6 +1308,9 @@ export function ProjectPage() {
       {groups.map(group => (
         <TaskGroup key={group.id ?? '__none__'} group={group}
           admin={admin} profile={profile}
+          selectedTaskIds={selectedTaskIds}
+          onToggleSelect={toggleTaskSelection}
+          onToggleGroup={toggleGroupSelection}
           onOpenTask={setSelectedTask}
           onCreateTask={subId => { setCreateSubId(subId); setShowCreate(true) }}
           onStatusChange={handleStatusChange}
@@ -1238,6 +1319,35 @@ export function ProjectPage() {
           onDragEnd={handleDragEnd}
         />
       ))}
+
+      {/* Bulk action bar */}
+      {selectedTaskIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl px-4 py-2.5">
+          <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 mr-1 shrink-0">{selectedTaskIds.size} vybráno</span>
+          <div className="w-px h-5 bg-gray-200 dark:bg-gray-600 mx-1" />
+          <select defaultValue="" onChange={e => { if (e.target.value) { handleBulkStatus(e.target.value as TaskStatus); e.currentTarget.value = '' } }}
+            className="px-2 py-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-700 dark:text-gray-300 cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="" disabled>Stav…</option>
+            {Object.entries(STATUS_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <select defaultValue="" onChange={e => { if (e.target.value) { handleBulkPriority(e.target.value as TaskPriority); e.currentTarget.value = '' } }}
+            className="px-2 py-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-700 dark:text-gray-300 cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="" disabled>Priorita…</option>
+            {Object.entries(PRIORITY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <select defaultValue="" onChange={e => { if (e.target.value) { handleBulkAssign(e.target.value); e.currentTarget.value = '' } }}
+            className="px-2 py-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-700 dark:text-gray-300 cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="" disabled>Přiřadit…</option>
+            {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+            <option value="__unassign__">— Zrušit přiřazení</option>
+          </select>
+          <div className="w-px h-5 bg-gray-200 dark:bg-gray-600 mx-1" />
+          <Button variant="danger" size="sm" onClick={handleBulkDelete}>Smazat</Button>
+          <button onClick={() => setSelectedTaskIds(new Set())} className="ml-1 p-1 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+            <X size={15} />
+          </button>
+        </div>
+      )}
 
       {/* Modals */}
       <TaskDetailModal
