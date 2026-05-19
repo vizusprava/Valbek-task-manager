@@ -622,7 +622,8 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, onToggle
   const commentCount = task.comments?.[0]?.count ?? 0
 
   return (
-    <tr ref={setNodeRef} style={style} onClick={onOpen}
+    <tr ref={setNodeRef} style={style}
+      onClick={anySelected ? (e: React.MouseEvent) => { e.stopPropagation(); onToggleSelect(task.id, e.shiftKey) } : onOpen}
       className={`group border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer
         ${selected ? 'bg-indigo-50 dark:bg-indigo-900/20' : task.status === 'hotovo' ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20' : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}
         ${isDragging ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}>
@@ -1417,9 +1418,9 @@ export function ProjectPage() {
         />
       ))}
 
-      {/* Bulk action bar */}
-      {selectedTaskIds.size > 0 && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl px-4 py-2.5">
+      {/* Bulk action bar — rendered via portal to escape page-enter transform stacking context */}
+      {selectedTaskIds.size > 0 && createPortal(
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl px-4 py-2.5">
           <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 mr-1 shrink-0">{selectedTaskIds.size} vybráno</span>
           <div className="w-px h-5 bg-gray-200 dark:bg-gray-600 mx-1" />
           <select defaultValue="" onChange={e => { if (e.target.value) { handleBulkStatus(e.target.value as TaskStatus); e.currentTarget.value = '' } }}
@@ -1443,7 +1444,8 @@ export function ProjectPage() {
           <button onClick={() => setSelectedTaskIds(new Set())} className="ml-1 p-1 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
             <X size={15} />
           </button>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Modals */}
