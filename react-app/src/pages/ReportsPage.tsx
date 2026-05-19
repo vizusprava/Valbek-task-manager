@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/authStore'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Avatar } from '@/components/ui/Avatar'
 import { PriorityBadge } from '@/components/ui/Badge'
-import type { Task, Project, Profile } from '@/lib/types'
+import type { Task, Project, Profile, Subproject } from '@/lib/types'
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -241,20 +241,30 @@ function PersonTable({ tasks, profiles }: { tasks: Task[]; profiles: Profile[] }
   )
 }
 
-// ── Person × Project matrix (admin only) ─────────────────────
+// ── Person × Category (subproject name) matrix ───────────────
 
-function PersonProjectMatrix({ tasks, projects, profiles }: { tasks: Task[]; projects: ProjectWithMembers[]; profiles: Profile[] }) {
+function PersonCategoryMatrix({ tasks, subprojects, profiles }: {
+  tasks: Task[]; subprojects: Subproject[]; profiles: Profile[]
+}) {
+  // Map subproject_id → name
+  const spMap = useMemo(() =>
+    Object.fromEntries(subprojects.map(s => [s.id, s.name]))
+  , [subprojects])
+
+  // Unique category names that have at least one task, sorted
+  const categories = useMemo(() => {
+    const names = new Set<string>()
+    tasks.forEach(t => { if (t.subproject_id && spMap[t.subproject_id]) names.add(spMap[t.subproject_id]) })
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'cs'))
+  }, [tasks, spMap])
+
+  // People with at least one task in any category
   const activeProfiles = useMemo(() =>
-    profiles.filter(p => tasks.some(t => t.assigned_to === p.id))
+    profiles.filter(p => tasks.some(t => t.assigned_to === p.id && t.subproject_id))
   , [tasks, profiles])
 
-  const activeProjects = useMemo(() =>
-    projects.filter(proj => tasks.some(t => t.project_id === proj.id && t.assigned_to !== null))
-      .sort((a, b) => a.name.localeCompare(b.name, 'cs'))
-  , [tasks, projects])
-
-  if (activeProfiles.length === 0 || activeProjects.length === 0) return (
-    <p className="text-sm text-gray-400 text-center py-6">Žádná data.</p>
+  if (categories.length === 0 || activeProfiles.length === 0) return (
+    <p className="text-sm text-gray-400 text-center py-6">Žádná data — úkoly nemají přiřazené kategorie.</p>
   )
 
   return (
@@ -262,10 +272,10 @@ function PersonProjectMatrix({ tasks, projects, profiles }: { tasks: Task[]; pro
       <table className="text-sm min-w-full">
         <thead>
           <tr className="border-b border-gray-100 dark:border-gray-800">
-            <th className="text-left pb-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide pr-4 sticky left-0 bg-white dark:bg-gray-900 z-10 min-w-[140px]">Osoba</th>
-            {activeProjects.map(p => (
-              <th key={p.id} className="text-center pb-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide px-3 max-w-[100px]">
-                <span className="block truncate max-w-[90px]" title={p.name}>{p.name}</span>
+            <th className="text-left pb-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide pr-4 sticky left-0 bg-white dark:bg-gray-900 z-10 min-w-[130px]">Osoba</th>
+            {categories.map(cat => (
+              <th key={cat} className="text-center pb-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide px-3">
+                <span className="block truncate max-w-[80px]" title={cat}>{cat}</span>
               </th>
             ))}
             <th className="text-center pb-2 text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide pl-3 border-l border-gray-100 dark:border-gray-800">Celkem</th>
@@ -273,27 +283,30 @@ function PersonProjectMatrix({ tasks, projects, profiles }: { tasks: Task[]; pro
         </thead>
         <tbody className="divide-y divide-gray-50 dark:divide-gray-800">
           {activeProfiles.map(p => {
-            const totalTasks = tasks.filter(t => t.assigned_to === p.id)
-            const totalDone  = totalTasks.filter(t => t.status === 'hotovo').length
-            const totalPct   = totalTasks.length === 0 ? 0 : Math.round((totalDone / totalTasks.length) * 100)
+            const allMine = tasks.filter(t => t.assigned_to === p.id)
+            const catMine = allMine.filter(t => t.subproject_id)
+            const totalDone = catMine.filter(t => t.status === 'hotovo').length
             return (
               <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
-                <td className="py-2.5 pr-4 sticky left-0 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800/50 z-10">
+                <td className="py-2.5 pr-4 sticky left-0 bg-white dark:bg-gray-900 group-hover:bg-gray-50 z-10">
                   <div className="flex items-center gap-2">
                     <Avatar name={p.name} initials={p.initials ?? undefined} color={p.color ?? undefined} small />
-                    <span className="font-medium text-gray-800 dark:text-gray-200 truncate max-w-[90px]">{p.name}</span>
+                    <span className="font-medium text-gray-800 dark:text-gray-200 truncate max-w-[80px]">{p.name}</span>
                   </div>
                 </td>
-                {activeProjects.map(proj => {
-                  const pt = tasks.filter(t => t.project_id === proj.id && t.assigned_to === p.id)
-                  const pd = pt.filter(t => t.status === 'hotovo').length
-                  const pct = pt.length === 0 ? 0 : Math.round((pd / pt.length) * 100)
-                  if (pt.length === 0) return <td key={proj.id} className="py-2.5 px-3 text-center text-gray-300 dark:text-gray-700 text-xs">—</td>
+                {categories.map(cat => {
+                  const sameNameIds = subprojects.filter(s => s.name === cat).map(s => s.id)
+                  const allCatTasks = tasks.filter(t => t.assigned_to === p.id && t.subproject_id && sameNameIds.includes(t.subproject_id))
+                  const done = allCatTasks.filter(t => t.status === 'hotovo').length
+                  if (allCatTasks.length === 0) return (
+                    <td key={cat} className="py-2.5 px-3 text-center text-gray-300 dark:text-gray-700 text-xs">—</td>
+                  )
+                  const pct = Math.round((done / allCatTasks.length) * 100)
                   return (
-                    <td key={proj.id} className="py-2.5 px-3 text-center">
+                    <td key={cat} className="py-2.5 px-3 text-center">
                       <div className="flex flex-col items-center gap-0.5">
                         <span className={`text-xs font-semibold ${pct === 100 ? 'text-green-600 dark:text-green-400' : 'text-gray-700 dark:text-gray-300'}`}>
-                          {pd}/{pt.length}
+                          {done}/{allCatTasks.length}
                         </span>
                         <div className="w-10 h-1 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
                           <div className={`h-full rounded-full ${pct === 100 ? 'bg-green-500' : 'bg-indigo-500'}`} style={{ width: `${pct}%` }} />
@@ -303,9 +316,7 @@ function PersonProjectMatrix({ tasks, projects, profiles }: { tasks: Task[]; pro
                   )
                 })}
                 <td className="py-2.5 pl-3 border-l border-gray-100 dark:border-gray-800 text-center">
-                  <span className={`text-xs font-bold ${totalPct === 100 ? 'text-green-600 dark:text-green-400' : 'text-gray-700 dark:text-gray-300'}`}>
-                    {totalDone}/{totalTasks.length}
-                  </span>
+                  <span className="text-xs font-bold text-gray-700 dark:text-gray-300">{totalDone}/{catMine.length}</span>
                 </td>
               </tr>
             )
@@ -349,6 +360,15 @@ export function ReportsPage() {
     enabled: isAdmin,
   })
 
+  const { data: subprojects = [] } = useQuery<Subproject[]>({
+    queryKey: ['reports-subprojects'],
+    queryFn: async () => {
+      const { data } = await supabase.from('subprojects').select('*')
+      return (data || []) as Subproject[]
+    },
+    enabled: isAdmin,
+  })
+
   // Overall stats
   const totalTasks  = allTasks.length
   const doneTasks   = allTasks.filter(t => t.status === 'hotovo').length
@@ -365,8 +385,6 @@ export function ReportsPage() {
       if (b.due_date) return 1
       return a.name.localeCompare(b.name)
     })
-
-  const otherProjects = projects.filter(p => p.status !== 'aktivní')
 
   return (
     <PageLayout>
@@ -401,18 +419,6 @@ export function ReportsPage() {
           )}
         </section>
 
-        {/* Other projects */}
-        {otherProjects.length > 0 && (
-          <section>
-            <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-3">Ostatní projekty</h2>
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {otherProjects.map(p => (
-                <ProjectCard key={p.id} project={p}
-                  tasks={allTasks.filter(t => t.project_id === p.id)} />
-              ))}
-            </div>
-          </section>
-        )}
 
         {/* Per person (admin only) */}
         {isAdmin && (
@@ -425,9 +431,10 @@ export function ReportsPage() {
             </section>
 
             <section>
-              <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-3">Aktivita osoby podle projektu</h2>
+              <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mb-3">Modely podle kategorie</h2>
+              <p className="text-xs text-gray-400 dark:text-gray-500 -mt-2 mb-3">Hotovo / celkem úkolů na osobu v každé kategorii (přes všechny projekty)</p>
               <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
-                <PersonProjectMatrix tasks={allTasks} projects={projects} profiles={profiles} />
+                <PersonCategoryMatrix tasks={allTasks} subprojects={subprojects} profiles={profiles} />
               </div>
             </section>
           </>

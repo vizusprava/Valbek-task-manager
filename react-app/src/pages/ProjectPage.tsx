@@ -1583,8 +1583,8 @@ function BulkCreateTasksModal({ open, onClose, projectId, subprojects, members, 
   const [tab,          setTab]          = useState<'series' | 'copy'>('series')
   const [prefix,       setPrefix]       = useState('')
   const [suffix,       setSuffix]       = useState('')
-  const [startNum,     setStartNum]     = useState(1)
-  const [endNum,       setEndNum]       = useState(10)
+  const [startNum,     setStartNum]     = useState<number | ''>('')
+  const [endNum,       setEndNum]       = useState<number | ''>('')
   const [subprojectId, setSubprojectId] = useState('')
   const [priority,     setPriority]     = useState<TaskPriority>('medium')
   const [dueDate,      setDueDate]      = useState('')
@@ -1611,6 +1611,7 @@ function BulkCreateTasksModal({ open, onClose, projectId, subprojects, members, 
       setTab('series'); setPrefix(''); setSuffix(''); setStartNum(1); setEndNum(10)
       setSubprojectId(''); setPriority('medium'); setDueDate(''); setFilePath('')
       setDescription(''); setAssignedToId(''); setTemplateId('')
+      setStartNum(''); setEndNum('')
       setCopyIds(new Set()); setCopyTarget(''); setCopyReset(true)
     }
   }, [open])
@@ -1622,8 +1623,11 @@ function BulkCreateTasksModal({ open, onClose, projectId, subprojects, members, 
     else      { setPrefix(''); setDescription(''); setPriority('medium') }
   }
 
-  const seriesCount = Math.max(0, Math.min(endNum - startNum + 1, 200))
-  const preview     = Array.from({ length: Math.min(seriesCount, 5) }, (_, i) => `${prefix}${startNum + i}${suffix}`.trim())
+  const seriesCount = (startNum !== '' && endNum !== '' && endNum >= startNum)
+    ? Math.min(endNum - startNum + 1, 30) : 0
+  const preview = Array.from({ length: Math.min(seriesCount, 5) }, (_, i) =>
+    `${prefix}${(startNum as number) + i}${suffix}`.trim()
+  )
 
   async function handleCreateSeries() {
     if (!prefix.trim() && !suffix.trim()) return
@@ -1632,7 +1636,7 @@ function BulkCreateTasksModal({ open, onClose, projectId, subprojects, members, 
       .reduce((m, t) => Math.max(m, t.sort_order), 0)
     const rows = Array.from({ length: seriesCount }, (_, i) => ({
       project_id: projectId,
-      title: `${prefix}${startNum + i}${suffix}`.trim(),
+      title: `${prefix}${(startNum as number) + i}${suffix}`.trim(),
       description: description.trim() || null,
       priority, status: 'neudělano' as TaskStatus,
       subproject_id: subprojectId || null,
@@ -1696,11 +1700,11 @@ function BulkCreateTasksModal({ open, onClose, projectId, subprojects, members, 
             </div>
             <div>
               <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Od čísla</label>
-              <input type="number" value={startNum} onChange={e => setStartNum(Number(e.target.value))} min={0} className={inputClass} />
+              <input type="number" value={startNum} onChange={e => setStartNum(e.target.value === '' ? '' : Number(e.target.value))} placeholder="201" className={inputClass} />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Do čísla</label>
-              <input type="number" value={endNum} onChange={e => setEndNum(Number(e.target.value))} min={startNum} className={inputClass} />
+              <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Do čísla (max +30)</label>
+              <input type="number" value={endNum} onChange={e => setEndNum(e.target.value === '' ? '' : Number(e.target.value))} placeholder="215" className={inputClass} />
             </div>
           </div>
           <div>
@@ -1753,7 +1757,7 @@ function BulkCreateTasksModal({ open, onClose, projectId, subprojects, members, 
           <div className="flex justify-end gap-2 pt-2 border-t border-gray-100 dark:border-gray-800">
             <Button variant="secondary" onClick={onClose}>Zrušit</Button>
             <Button variant="primary" loading={creating}
-              disabled={(!prefix.trim() && !suffix.trim()) || seriesCount === 0 || seriesCount > 200}
+              disabled={(!prefix.trim() && !suffix.trim()) || seriesCount === 0 || startNum === '' || endNum === ''}
               onClick={handleCreateSeries}>
               Vytvořit {seriesCount > 0 ? `${seriesCount} úkolů` : ''}
             </Button>
