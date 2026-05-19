@@ -9,6 +9,7 @@ import { DashboardPage } from '@/pages/DashboardPage'
 import { ProjectPage } from '@/pages/ProjectPage'
 import { MyTasksPage } from '@/pages/MyTasksPage'
 import { ReviewPage } from '@/pages/ReviewPage'
+import { ReportsPage } from '@/pages/ReportsPage'
 import { ThreeDMaxPage } from '@/pages/ThreeDMaxPage'
 import { ConfirmDialogProvider } from '@/components/ui/ConfirmDialog'
 
@@ -75,6 +76,7 @@ export default function App() {
           <Route path="/my-tasks" element={<AuthGuard><MyTasksPage /></AuthGuard>} />
           <Route path="/3dmax" element={<AuthGuard><ThreeDMaxPage /></AuthGuard>} />
           <Route path="/review" element={<AuthGuard><AdminGuard><ReviewPage /></AdminGuard></AuthGuard>} />
+          <Route path="/reports" element={<AuthGuard><ReportsPage /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </HashRouter>

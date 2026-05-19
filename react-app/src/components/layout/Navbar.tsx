@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import logoUrl from '@/assets/logo.png'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, ListTodo, Box, ClipboardCheck,
+  LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
   Bell, Sun, Moon, Menu, X, LogOut, Plus, Users, BookTemplate,
 } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
@@ -122,7 +122,8 @@ export function Navbar({ onCreateProject, onCreateUser, onManageTemplates }: Nav
         {navItem('/dashboard',  'Projekty',      LayoutDashboard)}
         {navItem('/my-tasks',   'Moje úkoly',    ListTodo)}
         {navItem('/3dmax',      '3DMax',          Box)}
-        {admin && navItem('/review', 'Ke kontrole', ClipboardCheck, reviewCount)}
+        {admin && navItem('/review',  'Ke kontrole', ClipboardCheck, reviewCount)}
+        {navItem('/reports',    'Reporty',        BarChart2)}
 
         {/* Admin akce */}
         {admin && (
