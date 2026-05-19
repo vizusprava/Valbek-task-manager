@@ -294,8 +294,9 @@ export function ReportsPage() {
   const otherProjects = projects.filter(p => p.status !== 'active')
 
   return (
-    <PageLayout title="Reporty">
+    <PageLayout>
       <div className="max-w-5xl mx-auto space-y-8">
+        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Reporty</h1>
 
         {/* Top stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
