@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
 import { Modal } from '@/components/ui/Modal'
-import { Avatar } from '@/components/ui/Avatar'
 import { supabase } from '@/lib/supabase'
 import { AVATAR_COLORS, avatarColor } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
