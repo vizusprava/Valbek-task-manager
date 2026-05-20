@@ -41,7 +41,7 @@ export function ConfirmDialogProvider({ children }: { children: React.ReactNode 
       {children}
       {options && createPortal(
         <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-[300]"
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-99999"
           onClick={() => handleResponse(false)}
         >
           <div

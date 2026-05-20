@@ -1448,7 +1448,9 @@ export function ProjectPage() {
       confirmLabel: 'Smazat projekt',
       variant: 'danger',
     })) return
-    await supabase.from('projects').delete().eq('id', projectId!)
+    const { error } = await supabase.from('projects').delete().eq('id', projectId!)
+    if (error) { toast.error(error.message); return }
+    queryClient.invalidateQueries({ queryKey: ['projects'] })
     toast.success('Projekt smazán.')
     navigate('/dashboard')
   }

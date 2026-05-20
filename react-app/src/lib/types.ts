@@ -124,6 +124,37 @@ export interface TaskTemplate {
   created_by: string | null
 }
 
+export interface ModelFile {
+  id: string
+  name: string
+  description: string | null
+  file_path: string
+  thumbnail_path: string | null
+  file_size: number | null
+  created_at: string
+  created_by: string | null
+}
+
+export interface ModelObjectColor {
+  model_id: string
+  object_name: string
+  color: string
+  updated_by: string | null
+  updated_at: string
+}
+
+export interface ModelAnnotation {
+  id: string
+  model_id: string
+  x: number
+  y: number
+  z: number
+  text: string
+  object_name: string | null
+  created_by: string | null
+  created_at: string
+}
+
 export interface ReferenceItem {
   id: string
   page: string
@@ -150,6 +181,7 @@ export type Database = {
       reference_items: { Row: ReferenceItem; Insert: Omit<ReferenceItem, 'id'>; Update: Partial<ReferenceItem> }
       task_templates: { Row: TaskTemplate; Insert: Omit<TaskTemplate, 'id' | 'created_at'>; Update: Partial<TaskTemplate> }
       task_assignees: { Row: { task_id: string; user_id: string }; Insert: { task_id: string; user_id: string }; Update: never }
+      model_annotations: { Row: ModelAnnotation; Insert: Omit<ModelAnnotation, 'id' | 'created_at'>; Update: Partial<ModelAnnotation> }
     }
     Functions: {
       get_email_by_username: {

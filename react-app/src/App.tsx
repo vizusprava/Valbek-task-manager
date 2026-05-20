@@ -11,6 +11,7 @@ import { MyTasksPage } from '@/pages/MyTasksPage'
 import { ReviewPage } from '@/pages/ReviewPage'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { ThreeDMaxPage } from '@/pages/ThreeDMaxPage'
+import { ModelsPage } from '@/pages/ModelsPage'
 import { ConfirmDialogProvider } from '@/components/ui/ConfirmDialog'
 
 const queryClient = new QueryClient({
@@ -75,6 +76,7 @@ export default function App() {
           <Route path="/project/:id" element={<AuthGuard><ProjectPage /></AuthGuard>} />
           <Route path="/my-tasks" element={<AuthGuard><MyTasksPage /></AuthGuard>} />
           <Route path="/3dmax" element={<AuthGuard><ThreeDMaxPage /></AuthGuard>} />
+          <Route path="/models" element={<AuthGuard><ModelsPage /></AuthGuard>} />
           <Route path="/review" element={<AuthGuard><AdminGuard><ReviewPage /></AdminGuard></AuthGuard>} />
           <Route path="/reports" element={<AuthGuard><ReportsPage /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

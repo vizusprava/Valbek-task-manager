@@ -3,7 +3,7 @@ import logoUrl from '@/assets/logo.png'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
-  Bell, Sun, Moon, Menu, X, LogOut, Plus, Users, BookTemplate, Palette,
+  Bell, Sun, Moon, Menu, X, LogOut, Plus, Users, BookTemplate, Palette, Boxes,
 } from 'lucide-react'
 import { useAuthStore, applyUserBg } from '@/stores/authStore'
 import { supabase } from '@/lib/supabase'
@@ -217,6 +217,7 @@ export function Navbar({ onCreateProject, onCreateUser, onManageTemplates }: Nav
         {navItem('/dashboard',  'Projekty',      LayoutDashboard)}
         {navItem('/my-tasks',   'Moje úkoly',    ListTodo)}
         {navItem('/3dmax',      '3DMax',          Box)}
+        {navItem('/models',     '3D Modely',      Boxes)}
         {admin && navItem('/review',  'Ke kontrole', ClipboardCheck, reviewCount)}
         {navItem('/reports',    'Reporty',        BarChart2)}
 
