@@ -607,11 +607,13 @@ function CreateTaskModal({ open, onClose, projectId, subprojects, members, defau
 
 // ── Sortable Task Row ─────────────────────────────────────────
 
-function SortableTaskRow({ task, admin, canEdit, selected, anySelected, onToggleSelect, onOpen, onStatusChange, onPriorityChange, onDueDateChange }: {
+function SortableTaskRow({ task, admin, canEdit, selected, anySelected, onToggleSelect, onOpen, onDragSelectStart, onDragSelectEnter, onStatusChange, onPriorityChange, onDueDateChange }: {
   task: TaskWithRelations; admin: boolean; canEdit: boolean
   selected: boolean; anySelected: boolean
   onToggleSelect: (id: string, shiftKey?: boolean) => void
   onOpen: () => void
+  onDragSelectStart: (id: string) => void
+  onDragSelectEnter: (id: string) => void
   onStatusChange: (taskId: string, val: TaskStatus) => void
   onPriorityChange: (taskId: string, val: TaskPriority) => void
   onDueDateChange: (taskId: string, val: string | null) => void
@@ -623,11 +625,15 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, onToggle
 
   return (
     <tr ref={setNodeRef} style={style}
-      onClick={anySelected ? (e: React.MouseEvent) => { e.stopPropagation(); onToggleSelect(task.id, e.shiftKey) } : onOpen}
-      className={`group border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer
+      onClick={anySelected ? undefined : onOpen}
+      onMouseDown={anySelected ? (e: React.MouseEvent) => { if (e.button === 0) { e.preventDefault(); onDragSelectStart(task.id) } } : undefined}
+      onMouseEnter={anySelected ? (e: React.MouseEvent) => { if (e.buttons === 1) onDragSelectEnter(task.id) } : undefined}
+      className={`group border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer select-none
         ${selected ? 'bg-indigo-50 dark:bg-indigo-900/20' : task.status === 'hotovo' ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20' : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}
         ${isDragging ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}>
-      <td className="pl-1.5 pr-1 py-2.5 w-12" onClick={e => { e.stopPropagation(); onToggleSelect(task.id, e.shiftKey) }}>
+      <td className="pl-1.5 pr-1 py-2.5 w-12"
+        onMouseDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); onToggleSelect(task.id, e.shiftKey) }}>
         <div className="flex items-center justify-center gap-0.5">
           {admin && !anySelected && (
             <span {...attributes} {...listeners}
@@ -700,7 +706,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, onToggle
 
 // ── Task Group ────────────────────────────────────────────────
 
-function TaskGroup({ group, admin, profile, selectedTaskIds, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onStatusChange, onPriorityChange, onDueDateChange, onDragEnd }: {
+function TaskGroup({ group, admin, profile, selectedTaskIds, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onDragSelectStart, onDragSelectEnter, onStatusChange, onPriorityChange, onDueDateChange, onDragEnd }: {
   group: { id: string | null; name: string; tasks: TaskWithRelations[] }
   admin: boolean; profile: { id: string } | null
   selectedTaskIds: Set<string>
@@ -708,6 +714,8 @@ function TaskGroup({ group, admin, profile, selectedTaskIds, onToggleSelect, onT
   onToggleGroup: (ids: string[]) => void
   onOpenTask: (task: TaskWithRelations) => void
   onCreateTask: (subprojectId: string) => void
+  onDragSelectStart: (id: string) => void
+  onDragSelectEnter: (id: string) => void
   onStatusChange: (taskId: string, val: TaskStatus) => void
   onPriorityChange: (taskId: string, val: TaskPriority) => void
   onDueDateChange: (taskId: string, val: string | null) => void
@@ -790,6 +798,8 @@ function TaskGroup({ group, admin, profile, selectedTaskIds, onToggleSelect, onT
                       anySelected={anySelected}
                       onToggleSelect={onToggleSelect}
                       onOpen={() => onOpenTask(task)}
+                      onDragSelectStart={onDragSelectStart}
+                      onDragSelectEnter={onDragSelectEnter}
                       onStatusChange={onStatusChange}
                       onPriorityChange={onPriorityChange}
                       onDueDateChange={onDueDateChange}
@@ -1079,8 +1089,9 @@ export function ProjectPage() {
   const [showTemplatesModal, setShowTemplatesModal] = useState(false)
   const [showBulkCreate,    setShowBulkCreate]    = useState(false)
   const [showAdminMenu,     setShowAdminMenu]     = useState(false)
-  const lastSelectedId = useRef<string | null>(null)
-  const adminMenuRef   = useRef<HTMLDivElement>(null)
+  const lastSelectedId    = useRef<string | null>(null)
+  const adminMenuRef      = useRef<HTMLDivElement>(null)
+  const isDragSelectActive = useRef(false)
 
   useEffect(() => {
     if (!showAdminMenu) return
@@ -1090,6 +1101,12 @@ export function ProjectPage() {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [showAdminMenu])
+
+  useEffect(() => {
+    function stop() { isDragSelectActive.current = false }
+    document.addEventListener('mouseup', stop)
+    return () => document.removeEventListener('mouseup', stop)
+  }, [])
 
   // ── Data queries ───────────────────────────────────────────
 
@@ -1244,6 +1261,19 @@ export function ProjectPage() {
       const next = new Set(prev)
       allIn ? ids.forEach(id => next.delete(id)) : ids.forEach(id => next.add(id))
       return next
+    })
+  }
+
+  function handleDragSelectStart(id: string) {
+    isDragSelectActive.current = true
+    setSelectedTaskIds(prev => { const n = new Set(prev); n.add(id); return n })
+  }
+
+  function handleDragSelectEnter(id: string) {
+    if (!isDragSelectActive.current) return
+    setSelectedTaskIds(prev => {
+      if (prev.has(id)) return prev
+      const n = new Set(prev); n.add(id); return n
     })
   }
 
@@ -1446,6 +1476,8 @@ export function ProjectPage() {
           onToggleGroup={toggleGroupSelection}
           onOpenTask={setSelectedTask}
           onCreateTask={subId => { setCreateSubId(subId); setShowCreate(true) }}
+          onDragSelectStart={handleDragSelectStart}
+          onDragSelectEnter={handleDragSelectEnter}
           onStatusChange={handleStatusChange}
           onPriorityChange={handlePriorityChange}
           onDueDateChange={handleDueDateChange}
