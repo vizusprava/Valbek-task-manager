@@ -44,6 +44,13 @@
 
 /* ─────────────────────────────────────────────────────────── */
 
+.app-bg {
+  background-color: var(--user-bg-light, #f9fafb);
+}
+.dark .app-bg {
+  background-color: var(--user-bg-dark, #030712);
+}
+
 @keyframes page-enter {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }

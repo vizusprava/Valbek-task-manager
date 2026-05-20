@@ -12,7 +12,7 @@ export function PageLayout({ children, onCreateProject, onCreateUser, onManageTe
   const { pathname } = useLocation()
 
   return (
-    <div className="app-grid min-h-screen bg-gray-50 dark:bg-gray-950 md:pl-56 pt-14 md:pt-0">
+    <div className="app-grid app-bg min-h-screen md:pl-56 pt-14 md:pt-0">
       <Navbar
         onCreateProject={onCreateProject}
         onCreateUser={onCreateUser}

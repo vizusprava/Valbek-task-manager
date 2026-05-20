@@ -9,6 +9,8 @@ export interface Profile {
   role: Role
   initials: string | null
   color: string | null
+  bg_light: string | null
+  bg_dark: string | null
 }
 
 export interface Project {
@@ -135,7 +137,7 @@ export interface ReferenceItem {
 export type Database = {
   public: {
     Tables: {
-      profiles: { Row: Profile; Insert: Omit<Profile, 'id'>; Update: Partial<Profile> }
+      profiles: { Row: Profile; Insert: Omit<Profile, 'id' | 'bg_light' | 'bg_dark'>; Update: Partial<Profile> }
       projects: { Row: Project; Insert: Omit<Project, 'id' | 'created_at'>; Update: Partial<Project> }
       project_members: { Row: { project_id: string; user_id: string }; Insert: { project_id: string; user_id: string }; Update: never }
       subprojects: { Row: Subproject; Insert: Omit<Subproject, 'id' | 'created_at'>; Update: Partial<Subproject> }

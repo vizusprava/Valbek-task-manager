@@ -738,7 +738,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
         </div>
         {task.description && <p className="text-xs text-gray-400 mt-0.5 truncate max-w-xs">{task.description}</p>}
       </td>
-      <td className="px-3 py-2.5 hidden sm:table-cell">
+      <td className="px-3 py-2.5 hidden sm:table-cell align-middle">
         {admin ? (
           <InlineAssigneeSelect
             assigneeIds={(task.task_assignees ?? []).map(a => a.user_id)}

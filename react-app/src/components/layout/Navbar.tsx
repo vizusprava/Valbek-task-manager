@@ -3,14 +3,108 @@ import logoUrl from '@/assets/logo.png'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
-  Bell, Sun, Moon, Menu, X, LogOut, Plus, Users, BookTemplate,
+  Bell, Sun, Moon, Menu, X, LogOut, Plus, Users, BookTemplate, Palette,
 } from 'lucide-react'
-import { useAuthStore } from '@/stores/authStore'
+import { useAuthStore, applyUserBg } from '@/stores/authStore'
 import { supabase } from '@/lib/supabase'
 import { Avatar } from '@/components/ui/Avatar'
 import { ProfileModal } from '@/components/layout/ProfileModal'
+import { ColorPicker } from '@/components/ui/ColorPicker'
 import { formatDateTime } from '@/lib/utils'
 import type { Notification } from '@/lib/types'
+
+function UserColorSettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { profile, setProfile } = useAuthStore()
+  const [lightColor, setLightColor] = useState(profile?.bg_light ?? '#f9fafb')
+  const [darkColor,  setDarkColor]  = useState(profile?.bg_dark  ?? '#030712')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (open) {
+      setLightColor(profile?.bg_light ?? '#f9fafb')
+      setDarkColor(profile?.bg_dark  ?? '#030712')
+    }
+  }, [open, profile?.bg_light, profile?.bg_dark])
+
+  function handleLightChange(hex: string) {
+    setLightColor(hex)
+    document.documentElement.style.setProperty('--user-bg-light', hex)
+  }
+
+  function handleDarkChange(hex: string) {
+    setDarkColor(hex)
+    document.documentElement.style.setProperty('--user-bg-dark', hex)
+  }
+
+  async function handleSave() {
+    if (!profile) return
+    setSaving(true)
+    const updates = { bg_light: lightColor, bg_dark: darkColor }
+    await supabase.from('profiles').update(updates).eq('id', profile.id)
+    const updated = { ...profile, ...updates }
+    setProfile(updated)
+    applyUserBg(updated)
+    setSaving(false)
+    onClose()
+  }
+
+  async function handleReset() {
+    if (!profile) return
+    setSaving(true)
+    await supabase.from('profiles').update({ bg_light: null, bg_dark: null }).eq('id', profile.id)
+    const updated = { ...profile, bg_light: null, bg_dark: null }
+    setProfile(updated)
+    applyUserBg(updated)
+    setLightColor('#f9fafb')
+    setDarkColor('#030712')
+    setSaving(false)
+    onClose()
+  }
+
+  function handleClose() {
+    applyUserBg(profile)
+    onClose()
+  }
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={handleClose}>
+      <div
+        className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-5"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Barvy pozadí</h2>
+          <button onClick={handleClose} className="p-1 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Světlý režim</p>
+          <ColorPicker color={lightColor} onChange={handleLightChange} />
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Tmavý režim</p>
+          <ColorPicker color={darkColor} onChange={handleDarkChange} />
+        </div>
+
+        <div className="flex items-center gap-2 pt-1">
+          <button onClick={handleReset} disabled={saving}
+            className="flex-1 px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50">
+            Obnovit výchozí
+          </button>
+          <button onClick={handleSave} disabled={saving}
+            className="flex-1 px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 font-medium">
+            {saving ? 'Ukládám…' : 'Uložit'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 interface NavbarProps {
   onCreateProject?: () => void
@@ -24,10 +118,11 @@ export function Navbar({ onCreateProject, onCreateUser, onManageTemplates }: Nav
   const { profile, logout, isAdmin } = useAuthStore()
   const admin = isAdmin()
 
-  const [dark,        setDark]        = useState(() => document.documentElement.classList.contains('dark'))
-  const [mobileOpen,  setMobileOpen]  = useState(false)
-  const [notifOpen,   setNotifOpen]   = useState(false)
-  const [profileOpen, setProfileOpen] = useState(false)
+  const [dark,              setDark]              = useState(() => document.documentElement.classList.contains('dark'))
+  const [mobileOpen,        setMobileOpen]        = useState(false)
+  const [notifOpen,         setNotifOpen]         = useState(false)
+  const [profileOpen,       setProfileOpen]       = useState(false)
+  const [colorSettingsOpen, setColorSettingsOpen] = useState(false)
   const [notifs,      setNotifs]      = useState<Notification[]>([])
   const [reviewCount, setReviewCount] = useState(0)
   const notifRef = useRef<HTMLDivElement>(null)
@@ -160,6 +255,13 @@ export function Navbar({ onCreateProject, onCreateUser, onManageTemplates }: Nav
           {dark ? 'Světlý režim' : 'Tmavý režim'}
         </button>
 
+        {/* Background color settings */}
+        <button onClick={() => setColorSettingsOpen(true)}
+          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-100 dark:hover:bg-gray-800 transition-colors">
+          <Palette size={17} className="shrink-0" />
+          Barvy pozadí
+        </button>
+
         {/* Notifications */}
         <div className="relative" ref={notifRef}>
           <button onClick={() => { setNotifOpen(o => !o); if (!notifOpen) loadNotifs() }}
@@ -243,6 +345,7 @@ export function Navbar({ onCreateProject, onCreateUser, onManageTemplates }: Nav
       )}
 
       <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+      <UserColorSettingsModal open={colorSettingsOpen} onClose={() => setColorSettingsOpen(false)} />
     </>
   )
 }

@@ -3,6 +3,20 @@ import type { User } from '@supabase/supabase-js'
 import type { Profile } from '@/lib/types'
 import { supabase } from '@/lib/supabase'
 
+export function applyUserBg(profile: Profile | null) {
+  const root = document.documentElement
+  if (profile?.bg_light) {
+    root.style.setProperty('--user-bg-light', profile.bg_light)
+  } else {
+    root.style.removeProperty('--user-bg-light')
+  }
+  if (profile?.bg_dark) {
+    root.style.setProperty('--user-bg-dark', profile.bg_dark)
+  } else {
+    root.style.removeProperty('--user-bg-dark')
+  }
+}
+
 interface AuthState {
   user: User | null
   profile: Profile | null
@@ -33,7 +47,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       .select('*')
       .eq('id', userId)
       .single()
-    if (data) set({ profile: data as Profile })
+    if (data) {
+      set({ profile: data as Profile })
+      applyUserBg(data as Profile)
+    }
     return data as Profile | null
   },
 
