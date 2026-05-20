@@ -1092,6 +1092,7 @@ export function ProjectPage() {
   const lastSelectedId    = useRef<string | null>(null)
   const adminMenuRef      = useRef<HTMLDivElement>(null)
   const isDragSelectActive = useRef(false)
+  const isDragSelectAdd    = useRef(true)
 
   useEffect(() => {
     if (!showAdminMenu) return
@@ -1266,14 +1267,24 @@ export function ProjectPage() {
 
   function handleDragSelectStart(id: string) {
     isDragSelectActive.current = true
-    setSelectedTaskIds(prev => { const n = new Set(prev); n.add(id); return n })
+    setSelectedTaskIds(prev => {
+      const n = new Set(prev)
+      if (n.has(id)) { isDragSelectAdd.current = false; n.delete(id) }
+      else            { isDragSelectAdd.current = true;  n.add(id)    }
+      return n
+    })
   }
 
   function handleDragSelectEnter(id: string) {
     if (!isDragSelectActive.current) return
     setSelectedTaskIds(prev => {
-      if (prev.has(id)) return prev
-      const n = new Set(prev); n.add(id); return n
+      if (isDragSelectAdd.current) {
+        if (prev.has(id)) return prev
+        const n = new Set(prev); n.add(id); return n
+      } else {
+        if (!prev.has(id)) return prev
+        const n = new Set(prev); n.delete(id); return n
+      }
     })
   }
 
