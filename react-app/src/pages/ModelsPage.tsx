@@ -396,6 +396,105 @@ function FocusTarget({ disabled }: { disabled: boolean }) {
   return null
 }
 
+// ── Fly camera (RMB + WASD, Unreal-style) ────────────────────
+
+const _euler = new THREE.Euler(0, 0, 0, 'YXZ')
+const _fwd   = new THREE.Vector3()
+const _right = new THREE.Vector3()
+const _up    = new THREE.Vector3(0, 1, 0)
+
+function FlyCamera({ speed, speedRef, onFlyChange }: {
+  speed: number
+  speedRef: { current: number }
+  onFlyChange: (v: boolean) => void
+}) {
+  const { camera, controls, gl } = useThree()
+  const controlsRef = useRef<any>(null)
+  const flyRef   = useRef(false)
+  const keysRef  = useRef(new Set<string>())
+
+  useEffect(() => { controlsRef.current = controls }, [controls])
+  useEffect(() => { speedRef.current = speed }, [speed, speedRef])
+
+  useEffect(() => {
+    const canvas = gl.domElement
+
+    function onContextMenu(e: MouseEvent) { if (flyRef.current) e.preventDefault() }
+
+    function onPointerDown(e: PointerEvent) {
+      if (e.button !== 2) return
+      e.stopPropagation()
+      flyRef.current = true
+      onFlyChange(true)
+      canvas.setPointerCapture(e.pointerId)
+    }
+
+    function onPointerUp(e: PointerEvent) {
+      if (e.button !== 2) return
+      flyRef.current = false
+      onFlyChange(false)
+      try { canvas.releasePointerCapture(e.pointerId) } catch (_) { /* ignore */ }
+      // Sync orbit target in front of camera so OrbitControls resumes smoothly
+      if (controlsRef.current) {
+        camera.getWorldDirection(_fwd)
+        controlsRef.current.target.copy(camera.position).addScaledVector(_fwd, 5)
+        controlsRef.current.update()
+      }
+    }
+
+    function onPointerMove(e: PointerEvent) {
+      if (!flyRef.current) return
+      _euler.setFromQuaternion(camera.quaternion)
+      _euler.y -= e.movementX * 0.003
+      _euler.x  = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, _euler.x - e.movementY * 0.003))
+      camera.quaternion.setFromEuler(_euler)
+    }
+
+    function onWheel(e: WheelEvent) {
+      if (!flyRef.current) return
+      e.preventDefault()
+      const factor = e.deltaY > 0 ? 0.85 : 1.18
+      speedRef.current = Math.max(0.5, Math.min(200, speedRef.current * factor))
+    }
+
+    function onKeyDown(e: KeyboardEvent) { keysRef.current.add(e.code) }
+    function onKeyUp(e: KeyboardEvent)   { keysRef.current.delete(e.code) }
+
+    canvas.addEventListener('contextmenu', onContextMenu)
+    canvas.addEventListener('pointerdown', onPointerDown, { capture: true })
+    canvas.addEventListener('pointerup',   onPointerUp,   { capture: true })
+    canvas.addEventListener('pointermove', onPointerMove, { capture: true })
+    canvas.addEventListener('wheel',       onWheel,       { passive: false })
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup',   onKeyUp)
+    return () => {
+      canvas.removeEventListener('contextmenu', onContextMenu)
+      canvas.removeEventListener('pointerdown', onPointerDown, { capture: true })
+      canvas.removeEventListener('pointerup',   onPointerUp,   { capture: true })
+      canvas.removeEventListener('pointermove', onPointerMove, { capture: true })
+      canvas.removeEventListener('wheel',       onWheel)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup',   onKeyUp)
+    }
+  }, [camera, gl, onFlyChange, speedRef])
+
+  useFrame((_, dt) => {
+    if (!flyRef.current) return
+    const spd = speedRef.current * dt
+    camera.getWorldDirection(_fwd)
+    _right.crossVectors(_fwd, _up).normalize()
+    const keys = keysRef.current
+    if (keys.has('KeyW')) camera.position.addScaledVector(_fwd,   spd)
+    if (keys.has('KeyS')) camera.position.addScaledVector(_fwd,  -spd)
+    if (keys.has('KeyA')) camera.position.addScaledVector(_right, -spd)
+    if (keys.has('KeyD')) camera.position.addScaledVector(_right,  spd)
+    if (keys.has('KeyE') || keys.has('Space'))    camera.position.addScaledVector(_up,  spd)
+    if (keys.has('KeyQ') || keys.has('ShiftLeft') || keys.has('ShiftRight')) camera.position.addScaledVector(_up, -spd)
+  })
+
+  return null
+}
+
 // ── Camera rig (preset views) ─────────────────────────────────
 
 function CameraRig({ commandRef, boundsRef }: {
@@ -721,6 +820,9 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
   const [pendingPin,        setPendingPin]        = useState<THREE.Vector3 | null>(null)
   const [pendingText,       setPendingText]       = useState('')
   const [pendingObjectName, setPendingObjectName] = useState('')
+  const [flyMode,  setFlyMode]  = useState(false)
+  const [flySpeed, setFlySpeed] = useState(10)
+  const flySpeedRef      = useRef(flySpeed)
   const meshMapRef       = useRef<Map<string, THREE.Mesh>>(new Map())
   const cameraCommandRef = useRef<((v: string) => void) | null>(null)
   const boundsRef        = useRef<THREE.Box3 | null>(null)
@@ -1022,14 +1124,15 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
             <VegetationLayer groups={vegGroups} />
             <CameraRig commandRef={cameraCommandRef} boundsRef={boundsRef} />
             <CameraNearFarSync />
-            <FocusTarget disabled={annotationMode || (vegOpen && vegPlaceMode === 'click' && vegType !== 'grass')} />
+            <FocusTarget disabled={flyMode || annotationMode || (vegOpen && vegPlaceMode === 'click' && vegType !== 'grass')} />
+            <FlyCamera speed={flySpeed} speedRef={flySpeedRef} onFlyChange={setFlyMode} />
             <GizmoHelper alignment="bottom-right" margin={[72, 72]}>
               <GizmoViewcube />
             </GizmoHelper>
-            <OrbitControls makeDefault zoomToCursor enableDamping dampingFactor={0.07} />
+            <OrbitControls makeDefault zoomToCursor enableDamping dampingFactor={0.07} enabled={!flyMode} />
           </Canvas>
 
-          {/* View preset buttons */}
+          {/* View preset buttons + fly speed */}
           <div className="absolute bottom-12 left-3 flex flex-col gap-1 z-10">
             {VIEW_PRESETS.map(v => (
               <button
@@ -1040,6 +1143,22 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
                 {v.label}
               </button>
             ))}
+            <div className={`mt-1 flex flex-col gap-0.5 px-1 py-1.5 bg-gray-900/80 border rounded transition-colors ${flyMode ? 'border-indigo-500' : 'border-gray-700'}`}>
+              <span className={`text-[9px] font-semibold text-center ${flyMode ? 'text-indigo-400' : 'text-gray-500'}`}>
+                {flyMode ? 'FLY' : 'spd'}
+              </span>
+              <input
+                type="range"
+                min={0.5}
+                max={100}
+                step={0.5}
+                value={flySpeed}
+                onChange={e => { const v = Number(e.target.value); setFlySpeed(v); flySpeedRef.current = v }}
+                className="w-8 accent-indigo-500"
+                title={`Rychlost letu: ${flySpeed} m/s`}
+              />
+              <span className="text-[9px] text-gray-400 text-center">{flySpeed}</span>
+            </div>
           </div>
 
           {/* Vegetation panel */}
