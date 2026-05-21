@@ -5,8 +5,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip, X, MoreHorizontal, CheckCircle } from 'lucide-react'
 import {
-  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
-  type DragEndEvent,
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors, DragOverlay, useDroppable,
+  type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -795,11 +795,12 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
 
 // ── Task Group ────────────────────────────────────────────────
 
-function TaskGroup({ group, admin, profile, members, selectedTaskIds, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onDragSelectStart, onDragSelectEnter, onAssigneesChange, onStatusChange, onPriorityChange, onDueDateChange, onDragEnd }: {
+function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDragId, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onDragSelectStart, onDragSelectEnter, onAssigneesChange, onStatusChange, onPriorityChange, onDueDateChange }: {
   group: { id: string | null; name: string; tasks: TaskWithRelations[] }
   admin: boolean; profile: { id: string } | null
   members: Profile[]
   selectedTaskIds: Set<string>
+  activeDragId: string | null
   onToggleSelect: (id: string, shiftKey?: boolean) => void
   onToggleGroup: (ids: string[]) => void
   onOpenTask: (task: TaskWithRelations) => void
@@ -810,7 +811,6 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, onToggleSe
   onStatusChange: (taskId: string, val: TaskStatus) => void
   onPriorityChange: (taskId: string, val: TaskPriority) => void
   onDueDateChange: (taskId: string, val: string | null) => void
-  onDragEnd: (subprojectId: string | null, activeId: string, overId: string) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const total = group.tasks.length
@@ -820,16 +820,13 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, onToggleSe
   const allGroupSelected = total > 0 && group.tasks.every(t => selectedTaskIds.has(t.id))
   const someGroupSelected = !allGroupSelected && group.tasks.some(t => selectedTaskIds.has(t.id))
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+  const droppableId = group.id ?? '__null__'
+  const { setNodeRef, isOver } = useDroppable({ id: droppableId })
 
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
-    onDragEnd(group.id, String(active.id), String(over.id))
-  }
+  const showDropZone = activeDragId !== null && isOver
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden mb-4">
+    <div ref={setNodeRef} className={`bg-white dark:bg-gray-900 rounded-xl border overflow-hidden mb-4 transition-colors ${showDropZone ? 'border-indigo-400 dark:border-indigo-500' : 'border-gray-200 dark:border-gray-800'}`}>
       {/* Group header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800 cursor-pointer select-none hover:bg-gray-50 dark:hover:bg-gray-800/50"
         onClick={() => setCollapsed(c => !c)}>
@@ -861,47 +858,48 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, onToggleSe
 
       {!collapsed && (
         total === 0 ? (
-          <div className="px-4 py-6 text-center text-sm text-gray-400">
-            Žádné úkoly v této skupině.
-            <button onClick={() => onCreateTask(group.id ?? '')} className="ml-2 text-indigo-600 dark:text-indigo-400 hover:underline">+ Přidat úkol</button>
+          <div className={`px-4 py-6 text-center text-sm transition-colors ${showDropZone ? 'text-indigo-500 bg-indigo-50 dark:bg-indigo-900/20' : 'text-gray-400'}`}>
+            {showDropZone ? 'Přetáhněte sem' : (
+              <>Žádné úkoly v této skupině.
+                <button onClick={() => onCreateTask(group.id ?? '')} className="ml-2 text-indigo-600 dark:text-indigo-400 hover:underline">+ Přidat úkol</button>
+              </>
+            )}
           </div>
         ) : (
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-            <SortableContext items={group.tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
-              <table className="w-full text-sm table-fixed">
-                <thead>
-                  <tr className="border-b border-gray-50 dark:border-gray-800 text-xs text-gray-400 uppercase tracking-wide">
-                    <th className="w-12 pl-1.5 shrink-0" />
-                    <th className="text-left px-3 py-2 font-medium">Úkol</th>
-                    <th className="text-left px-3 py-2 font-medium hidden sm:table-cell w-36">Přiřazený</th>
-                    <th className="text-left px-3 py-2 font-medium w-36">Stav</th>
-                    <th className="text-left px-3 py-2 font-medium hidden md:table-cell w-28">Priorita</th>
-                    <th className="text-left px-3 py-2 font-medium hidden lg:table-cell w-32">Termín</th>
-                    <th className="w-8 hidden xl:table-cell" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {group.tasks.map(task => (
-                    <SortableTaskRow key={task.id} task={task}
-                      admin={admin}
-                      canEdit={admin || task.assigned_to === profile?.id}
-                      selected={selectedTaskIds.has(task.id)}
-                      anySelected={anySelected}
-                      members={members}
-                      onToggleSelect={onToggleSelect}
-                      onOpen={() => onOpenTask(task)}
-                      onDragSelectStart={onDragSelectStart}
-                      onDragSelectEnter={onDragSelectEnter}
-                      onAssigneesChange={onAssigneesChange}
-                      onStatusChange={onStatusChange}
-                      onPriorityChange={onPriorityChange}
-                      onDueDateChange={onDueDateChange}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </SortableContext>
-          </DndContext>
+          <SortableContext items={group.tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
+            <table className="w-full text-sm table-fixed">
+              <thead>
+                <tr className="border-b border-gray-50 dark:border-gray-800 text-xs text-gray-400 uppercase tracking-wide">
+                  <th className="w-12 pl-1.5 shrink-0" />
+                  <th className="text-left px-3 py-2 font-medium">Úkol</th>
+                  <th className="text-left px-3 py-2 font-medium hidden sm:table-cell w-36">Přiřazený</th>
+                  <th className="text-left px-3 py-2 font-medium w-36">Stav</th>
+                  <th className="text-left px-3 py-2 font-medium hidden md:table-cell w-28">Priorita</th>
+                  <th className="text-left px-3 py-2 font-medium hidden lg:table-cell w-32">Termín</th>
+                  <th className="w-8 hidden xl:table-cell" />
+                </tr>
+              </thead>
+              <tbody>
+                {group.tasks.map(task => (
+                  <SortableTaskRow key={task.id} task={task}
+                    admin={admin}
+                    canEdit={admin || task.assigned_to === profile?.id}
+                    selected={selectedTaskIds.has(task.id)}
+                    anySelected={anySelected}
+                    members={members}
+                    onToggleSelect={onToggleSelect}
+                    onOpen={() => onOpenTask(task)}
+                    onDragSelectStart={onDragSelectStart}
+                    onDragSelectEnter={onDragSelectEnter}
+                    onAssigneesChange={onAssigneesChange}
+                    onStatusChange={onStatusChange}
+                    onPriorityChange={onPriorityChange}
+                    onDueDateChange={onDueDateChange}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </SortableContext>
         )
       )}
     </div>
@@ -1182,10 +1180,12 @@ export function ProjectPage() {
   const [showTemplatesModal, setShowTemplatesModal] = useState(false)
   const [showBulkCreate,    setShowBulkCreate]    = useState(false)
   const [showAdminMenu,     setShowAdminMenu]     = useState(false)
+  const [activeDragId,      setActiveDragId]      = useState<string | null>(null)
   const lastSelectedId    = useRef<string | null>(null)
   const adminMenuRef      = useRef<HTMLDivElement>(null)
   const isDragSelectActive = useRef(false)
   const isDragSelectAdd    = useRef(true)
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   useEffect(() => {
     if (!showAdminMenu) return
@@ -1317,15 +1317,46 @@ export function ProjectPage() {
 
   // ── Drag & drop ────────────────────────────────────────────
 
-  async function handleDragEnd(subprojectId: string | null, activeId: string, overId: string) {
-    const subTasks = tasks.filter(t => t.subproject_id === subprojectId || (!t.subproject_id && subprojectId === null))
-    const oldIndex = subTasks.findIndex(t => t.id === activeId)
-    const newIndex = subTasks.findIndex(t => t.id === overId)
-    if (oldIndex === -1 || newIndex === -1) return
+  function handleDragStart(event: DragStartEvent) {
+    setActiveDragId(String(event.active.id))
+  }
 
-    const reordered = arrayMove(subTasks, oldIndex, newIndex)
-    const updates = reordered.map((t, i) => supabase.from('tasks').update({ sort_order: (i + 1) * 10 }).eq('id', t.id))
-    await Promise.all(updates)
+  async function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    setActiveDragId(null)
+    if (!over) return
+
+    const activeId = String(active.id)
+    const overId   = String(over.id)
+    if (activeId === overId) return
+
+    const activeTask = tasks.find(t => t.id === activeId)
+    if (!activeTask) return
+
+    const activeSubId = activeTask.subproject_id ?? null
+
+    // overId is either a task id or a droppable container id (subproject id or '__null__')
+    const overTask = tasks.find(t => t.id === overId)
+    const targetSubId: string | null = overTask
+      ? (overTask.subproject_id ?? null)
+      : (overId === '__null__' ? null : overId)
+
+    if (activeSubId !== targetSubId) {
+      // Cross-subproject move — append to end of target group
+      const targetTasks = tasks.filter(t => (t.subproject_id ?? null) === targetSubId)
+      const maxOrder = targetTasks.length > 0 ? Math.max(...targetTasks.map(t => t.sort_order ?? 0)) : 0
+      await supabase.from('tasks').update({ subproject_id: targetSubId, sort_order: maxOrder + 10 }).eq('id', activeId)
+    } else {
+      // Same subproject — reorder
+      const subTasks = tasks.filter(t => (t.subproject_id ?? null) === activeSubId)
+      const oldIndex = subTasks.findIndex(t => t.id === activeId)
+      const newIndex = subTasks.findIndex(t => t.id === overId)
+      if (oldIndex === -1 || newIndex === -1) return
+      const reordered = arrayMove(subTasks, oldIndex, newIndex)
+      const updates = reordered.map((t, i) => supabase.from('tasks').update({ sort_order: (i + 1) * 10 }).eq('id', t.id))
+      await Promise.all(updates)
+    }
+
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
@@ -1599,24 +1630,36 @@ export function ProjectPage() {
       </div>
 
       {/* Task groups */}
-      {groups.map(group => (
-        <TaskGroup key={group.id ?? '__none__'} group={group}
-          admin={admin} profile={profile}
-          members={members}
-          selectedTaskIds={selectedTaskIds}
-          onToggleSelect={toggleTaskSelection}
-          onToggleGroup={toggleGroupSelection}
-          onOpenTask={setSelectedTask}
-          onCreateTask={subId => { setCreateSubId(subId); setShowCreate(true) }}
-          onDragSelectStart={handleDragSelectStart}
-          onDragSelectEnter={handleDragSelectEnter}
-          onAssigneesChange={handleAssigneesChange}
-          onStatusChange={handleStatusChange}
-          onPriorityChange={handlePriorityChange}
-          onDueDateChange={handleDueDateChange}
-          onDragEnd={handleDragEnd}
-        />
-      ))}
+      <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        {groups.map(group => (
+          <TaskGroup key={group.id ?? '__none__'} group={group}
+            admin={admin} profile={profile}
+            members={members}
+            selectedTaskIds={selectedTaskIds}
+            activeDragId={activeDragId}
+            onToggleSelect={toggleTaskSelection}
+            onToggleGroup={toggleGroupSelection}
+            onOpenTask={setSelectedTask}
+            onCreateTask={subId => { setCreateSubId(subId); setShowCreate(true) }}
+            onDragSelectStart={handleDragSelectStart}
+            onDragSelectEnter={handleDragSelectEnter}
+            onAssigneesChange={handleAssigneesChange}
+            onStatusChange={handleStatusChange}
+            onPriorityChange={handlePriorityChange}
+            onDueDateChange={handleDueDateChange}
+          />
+        ))}
+        <DragOverlay>
+          {activeDragId && (() => {
+            const t = tasks.find(x => x.id === activeDragId)
+            return t ? (
+              <div className="px-3 py-2 bg-white dark:bg-gray-800 border border-indigo-300 dark:border-indigo-600 rounded-lg shadow-xl text-sm font-medium text-gray-800 dark:text-gray-200 cursor-grabbing max-w-sm">
+                {t.title}
+              </div>
+            ) : null
+          })()}
+        </DragOverlay>
+      </DndContext>
 
       {/* Bulk action bar — rendered via portal to escape page-enter transform stacking context */}
       {selectedTaskIds.size > 0 && createPortal(
