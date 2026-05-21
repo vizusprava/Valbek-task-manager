@@ -721,7 +721,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
         onMouseDown={e => e.stopPropagation()}
         onClick={e => { e.stopPropagation(); onToggleSelect(task.id, e.shiftKey) }}>
         <div className="flex items-center justify-center gap-0.5">
-          {admin && !anySelected && (
+          {admin && (
             <span {...attributes} {...listeners}
               onClick={e => e.stopPropagation()}
               className="flex items-center justify-center cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity select-none">
