@@ -1265,6 +1265,7 @@ export function ModelsPage() {
   const { profile, isAdmin } = useAuthStore()
   const admin = isAdmin()
   const qc = useQueryClient()
+  const confirm = useConfirm()
 
   const [viewerModel, setViewerModel] = useState<{ model: ModelFile; url: string } | null>(null)
   const [uploadOpen, setUploadOpen]   = useState(false)
@@ -1341,8 +1342,12 @@ export function ModelsPage() {
   }
 
   async function handleDelete(model: ModelFile) {
-    await supabase.storage.from(BUCKET).remove([model.file_path])
-    await supabase.from('model_files').delete().eq('id', model.id)
+    if (!await confirm({ title: 'Smazat model', message: `Opravdu smazat model „${model.name}"? Tato akce je nevratná.`, confirmLabel: 'Smazat', variant: 'danger' })) return
+    const filesToRemove = [model.file_path, ...(model.thumbnail_path ? [model.thumbnail_path] : [])]
+    const { error: storageErr } = await supabase.storage.from(BUCKET).remove(filesToRemove)
+    if (storageErr) { toast.error('Chyba při mazání souboru: ' + storageErr.message); return }
+    const { error: dbErr } = await supabase.from('model_files').delete().eq('id', model.id)
+    if (dbErr) { toast.error('Chyba při mazání záznamu: ' + dbErr.message); return }
     qc.invalidateQueries({ queryKey: ['model_files'] })
     toast.success('Model smazán')
   }

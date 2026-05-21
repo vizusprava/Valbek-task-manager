@@ -1386,11 +1386,23 @@ export function ProjectPage() {
   async function handleAssigneesChange(taskId: string, assigneeIds: string[]) {
     if (!profile) return
     const assigned_to = assigneeIds[0] || null
+
+    const { data: current } = await supabase.from('task_assignees').select('user_id').eq('task_id', taskId)
+    const prevIds = (current ?? []).map(r => r.user_id)
+    const newIds  = assigneeIds.filter(id => !prevIds.includes(id) && id !== profile.id)
+
     await supabase.from('tasks').update({ assigned_to, updated_by: profile.id }).eq('id', taskId)
     await supabase.from('task_assignees').delete().eq('task_id', taskId)
-    if (assigneeIds.length > 0) {
+    if (assigneeIds.length > 0)
       await supabase.from('task_assignees').insert(assigneeIds.map(uid => ({ task_id: taskId, user_id: uid })))
+
+    if (newIds.length > 0) {
+      const taskTitle = tasks.find(t => t.id === taskId)?.title ?? ''
+      await supabase.from('notifications').insert(
+        newIds.map(uid => ({ user_id: uid, type: 'task_assigned', message: `Byl/a jsi přiřazen/a k úkolu: ${taskTitle}`, task_id: taskId, project_id: projectId }))
+      )
     }
+
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
