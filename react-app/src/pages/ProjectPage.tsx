@@ -1334,28 +1334,41 @@ export function ProjectPage() {
     const activeTask = tasks.find(t => t.id === activeId)
     if (!activeTask) return
 
-    const activeSubId = activeTask.subproject_id ?? null
-
     // overId is either a task id or a droppable container id (subproject id or '__null__')
     const overTask = tasks.find(t => t.id === overId)
     const targetSubId: string | null = overTask
       ? (overTask.subproject_id ?? null)
       : (overId === '__null__' ? null : overId)
 
-    if (activeSubId !== targetSubId) {
-      // Cross-subproject move — append to end of target group
-      const targetTasks = tasks.filter(t => (t.subproject_id ?? null) === targetSubId)
+    const isDraggingSelection = selectedTaskIds.size > 1 && selectedTaskIds.has(activeId)
+
+    if (isDraggingSelection) {
+      // Multi-task move — append all selected tasks to target group in their current order
+      const orderedSelected = tasks.filter(t => selectedTaskIds.has(t.id))
+      const targetTasks = tasks.filter(t => (t.subproject_id ?? null) === targetSubId && !selectedTaskIds.has(t.id))
       const maxOrder = targetTasks.length > 0 ? Math.max(...targetTasks.map(t => t.sort_order ?? 0)) : 0
-      await supabase.from('tasks').update({ subproject_id: targetSubId, sort_order: maxOrder + 10 }).eq('id', activeId)
-    } else {
-      // Same subproject — reorder
-      const subTasks = tasks.filter(t => (t.subproject_id ?? null) === activeSubId)
-      const oldIndex = subTasks.findIndex(t => t.id === activeId)
-      const newIndex = subTasks.findIndex(t => t.id === overId)
-      if (oldIndex === -1 || newIndex === -1) return
-      const reordered = arrayMove(subTasks, oldIndex, newIndex)
-      const updates = reordered.map((t, i) => supabase.from('tasks').update({ sort_order: (i + 1) * 10 }).eq('id', t.id))
+      const updates = orderedSelected.map((t, i) =>
+        supabase.from('tasks').update({ subproject_id: targetSubId, sort_order: maxOrder + (i + 1) * 10 }).eq('id', t.id)
+      )
       await Promise.all(updates)
+      setSelectedTaskIds(new Set())
+    } else {
+      const activeSubId = activeTask.subproject_id ?? null
+      if (activeSubId !== targetSubId) {
+        // Single cross-subproject move — append to end of target group
+        const targetTasks = tasks.filter(t => (t.subproject_id ?? null) === targetSubId)
+        const maxOrder = targetTasks.length > 0 ? Math.max(...targetTasks.map(t => t.sort_order ?? 0)) : 0
+        await supabase.from('tasks').update({ subproject_id: targetSubId, sort_order: maxOrder + 10 }).eq('id', activeId)
+      } else {
+        // Same subproject — reorder
+        const subTasks = tasks.filter(t => (t.subproject_id ?? null) === activeSubId)
+        const oldIndex = subTasks.findIndex(t => t.id === activeId)
+        const newIndex = subTasks.findIndex(t => t.id === overId)
+        if (oldIndex === -1 || newIndex === -1) return
+        const reordered = arrayMove(subTasks, oldIndex, newIndex)
+        const updates = reordered.map((t, i) => supabase.from('tasks').update({ sort_order: (i + 1) * 10 }).eq('id', t.id))
+        await Promise.all(updates)
+      }
     }
 
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
@@ -1652,12 +1665,19 @@ export function ProjectPage() {
         ))}
         <DragOverlay modifiers={[snapCenterToCursor]}>
           {activeDragId && (() => {
+            const isMulti = selectedTaskIds.size > 1 && selectedTaskIds.has(activeDragId)
             const t = tasks.find(x => x.id === activeDragId)
-            return t ? (
-              <div className="px-3 py-2 bg-white dark:bg-gray-800 border border-indigo-300 dark:border-indigo-600 rounded-lg shadow-xl text-sm font-medium text-gray-800 dark:text-gray-200 cursor-grabbing max-w-sm">
-                {t.title}
+            if (!t) return null
+            return (
+              <div className="px-3 py-2 bg-white dark:bg-gray-800 border border-indigo-300 dark:border-indigo-600 rounded-lg shadow-xl text-sm font-medium text-gray-800 dark:text-gray-200 cursor-grabbing max-w-sm flex items-center gap-2">
+                {isMulti && (
+                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-indigo-600 text-white text-xs font-bold shrink-0">
+                    {selectedTaskIds.size}
+                  </span>
+                )}
+                <span className="truncate">{isMulti ? `${selectedTaskIds.size} vybrané úkoly` : t.title}</span>
               </div>
-            ) : null
+            )
           })()}
         </DragOverlay>
       </DndContext>
