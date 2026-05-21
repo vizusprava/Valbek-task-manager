@@ -396,53 +396,62 @@ function FocusTarget({ disabled }: { disabled: boolean }) {
   return null
 }
 
-// ── Fly camera (RMB + WASD, Unreal-style) ────────────────────
+// ── Fly camera (F toggle + WASD, Unreal-style) ───────────────
 
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ')
 const _fwd   = new THREE.Vector3()
 const _right = new THREE.Vector3()
 const _up    = new THREE.Vector3(0, 1, 0)
 
-function FlyCamera({ speed, speedRef, onFlyChange }: {
-  speed: number
+function FlyCamera({ speedRef, onFlyChange }: {
   speedRef: { current: number }
   onFlyChange: (v: boolean) => void
 }) {
   const { camera, controls, gl } = useThree()
   const controlsRef = useRef<any>(null)
-  const flyRef   = useRef(false)
-  const keysRef  = useRef(new Set<string>())
+  const flyRef  = useRef(false)
+  const keysRef = useRef(new Set<string>())
 
   useEffect(() => { controlsRef.current = controls }, [controls])
-  useEffect(() => { speedRef.current = speed }, [speed, speedRef])
 
   useEffect(() => {
     const canvas = gl.domElement
 
-    function onContextMenu(e: MouseEvent) { if (flyRef.current) e.preventDefault() }
+    function syncOrbitTarget() {
+      if (!controlsRef.current) return
+      camera.getWorldDirection(_fwd)
+      controlsRef.current.target.copy(camera.position).addScaledVector(_fwd, 5)
+      controlsRef.current.update()
+    }
 
-    function onPointerDown(e: PointerEvent) {
-      if (e.button !== 2) return
-      e.stopPropagation()
+    function enterFly() {
       flyRef.current = true
       onFlyChange(true)
-      canvas.setPointerCapture(e.pointerId)
+      canvas.requestPointerLock()
     }
 
-    function onPointerUp(e: PointerEvent) {
-      if (e.button !== 2) return
+    function exitFly() {
       flyRef.current = false
       onFlyChange(false)
-      try { canvas.releasePointerCapture(e.pointerId) } catch (_) { /* ignore */ }
-      // Sync orbit target in front of camera so OrbitControls resumes smoothly
-      if (controlsRef.current) {
-        camera.getWorldDirection(_fwd)
-        controlsRef.current.target.copy(camera.position).addScaledVector(_fwd, 5)
-        controlsRef.current.update()
-      }
+      keysRef.current.clear()
+      if (document.pointerLockElement === canvas) document.exitPointerLock()
+      syncOrbitTarget()
     }
 
-    function onPointerMove(e: PointerEvent) {
+    function onPointerLockChange() {
+      // user pressed Escape → browser exits pointer lock automatically
+      if (document.pointerLockElement !== canvas && flyRef.current) exitFly()
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      keysRef.current.add(e.code)
+      if (e.code === 'KeyF') {
+        flyRef.current ? exitFly() : enterFly()
+      }
+    }
+    function onKeyUp(e: KeyboardEvent) { keysRef.current.delete(e.code) }
+
+    function onMouseMove(e: MouseEvent) {
       if (!flyRef.current) return
       _euler.setFromQuaternion(camera.quaternion)
       _euler.y -= e.movementX * 0.003
@@ -457,22 +466,15 @@ function FlyCamera({ speed, speedRef, onFlyChange }: {
       speedRef.current = Math.max(0.5, Math.min(200, speedRef.current * factor))
     }
 
-    function onKeyDown(e: KeyboardEvent) { keysRef.current.add(e.code) }
-    function onKeyUp(e: KeyboardEvent)   { keysRef.current.delete(e.code) }
-
-    canvas.addEventListener('contextmenu', onContextMenu)
-    canvas.addEventListener('pointerdown', onPointerDown, { capture: true })
-    canvas.addEventListener('pointerup',   onPointerUp,   { capture: true })
-    canvas.addEventListener('pointermove', onPointerMove, { capture: true })
-    canvas.addEventListener('wheel',       onWheel,       { passive: false })
+    document.addEventListener('pointerlockchange', onPointerLockChange)
+    document.addEventListener('mousemove', onMouseMove)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup',   onKeyUp)
     return () => {
-      canvas.removeEventListener('contextmenu', onContextMenu)
-      canvas.removeEventListener('pointerdown', onPointerDown, { capture: true })
-      canvas.removeEventListener('pointerup',   onPointerUp,   { capture: true })
-      canvas.removeEventListener('pointermove', onPointerMove, { capture: true })
-      canvas.removeEventListener('wheel',       onWheel)
+      document.removeEventListener('pointerlockchange', onPointerLockChange)
+      document.removeEventListener('mousemove', onMouseMove)
+      canvas.removeEventListener('wheel', onWheel)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup',   onKeyUp)
     }
@@ -484,11 +486,11 @@ function FlyCamera({ speed, speedRef, onFlyChange }: {
     camera.getWorldDirection(_fwd)
     _right.crossVectors(_fwd, _up).normalize()
     const keys = keysRef.current
-    if (keys.has('KeyW')) camera.position.addScaledVector(_fwd,   spd)
-    if (keys.has('KeyS')) camera.position.addScaledVector(_fwd,  -spd)
-    if (keys.has('KeyA')) camera.position.addScaledVector(_right, -spd)
-    if (keys.has('KeyD')) camera.position.addScaledVector(_right,  spd)
-    if (keys.has('KeyE') || keys.has('Space'))    camera.position.addScaledVector(_up,  spd)
+    if (keys.has('KeyW')) camera.position.addScaledVector(_fwd,    spd)
+    if (keys.has('KeyS')) camera.position.addScaledVector(_fwd,   -spd)
+    if (keys.has('KeyA')) camera.position.addScaledVector(_right,  -spd)
+    if (keys.has('KeyD')) camera.position.addScaledVector(_right,   spd)
+    if (keys.has('KeyE') || keys.has('Space'))                        camera.position.addScaledVector(_up,  spd)
     if (keys.has('KeyQ') || keys.has('ShiftLeft') || keys.has('ShiftRight')) camera.position.addScaledVector(_up, -spd)
   })
 
@@ -1125,7 +1127,7 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
             <CameraRig commandRef={cameraCommandRef} boundsRef={boundsRef} />
             <CameraNearFarSync />
             <FocusTarget disabled={flyMode || annotationMode || (vegOpen && vegPlaceMode === 'click' && vegType !== 'grass')} />
-            <FlyCamera speed={flySpeed} speedRef={flySpeedRef} onFlyChange={setFlyMode} />
+            <FlyCamera speedRef={flySpeedRef} onFlyChange={setFlyMode} />
             <GizmoHelper alignment="bottom-right" margin={[72, 72]}>
               <GizmoViewcube />
             </GizmoHelper>
