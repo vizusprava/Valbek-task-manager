@@ -223,15 +223,16 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
     enabled: !!task,
   })
 
-  const { data: history = [] } = useQuery({
+  const queryClient = useQueryClient()
+  const { data: history = [], refetch: refetchHistory } = useQuery({
     queryKey: ['task-history', task?.id],
     queryFn: async () => {
       const { data } = await supabase.from('task_activity')
         .select('*, user:user_id(id, name)').eq('task_id', task!.id)
-        .order('created_at', { ascending: false }).limit(50)
+        .order('created_at', { ascending: false }).limit(100)
       return data || []
     },
-    enabled: !!task && activeTab === 'history',
+    enabled: !!task,
   })
 
   useEffect(() => {
@@ -258,20 +259,53 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
     const { error: err } = await supabase.from('tasks').update(updateData).eq('id', task.id)
     if (err) { setError(err.message); setSaving(false); return }
 
+    // Collect activity log entries
+    type ActivityEntry = { field: string; old_value: string | null; new_value: string | null }
+    const entries: ActivityEntry[] = []
+
+    if (title.trim() !== task.title)
+      entries.push({ field: 'název', old_value: task.title, new_value: title.trim() })
+    if (status !== task.status)
+      entries.push({ field: 'stav', old_value: STATUS_LABELS[task.status], new_value: STATUS_LABELS[status] })
+    if (priority !== task.priority)
+      entries.push({ field: 'priorita', old_value: PRIORITY_LABELS[task.priority], new_value: PRIORITY_LABELS[priority] })
+    if ((dueDate || null) !== task.due_date)
+      entries.push({ field: 'termín', old_value: formatDate(task.due_date), new_value: formatDate(dueDate || null) })
+    if ((desc.trim() || null) !== (task.description || null))
+      entries.push({ field: 'popis', old_value: task.description ? '(text)' : null, new_value: desc.trim() ? '(text)' : null })
+    const prevSubId = task.subproject_id ?? null
+    const newSubId  = subprojectId || null
+    if (prevSubId !== newSubId)
+      entries.push({ field: 'podprojekt', old_value: subprojects.find(s => s.id === prevSubId)?.name ?? 'Bez podprojektu', new_value: subprojects.find(s => s.id === newSubId)?.name ?? 'Bez podprojektu' })
+
     if (admin) {
       const prevIds = task.task_assignees?.map(a => a.user_id) ?? (task.assigned_to ? [task.assigned_to] : [])
+      const addedIds = assignedToIds.filter(id => !prevIds.includes(id))
+      const removedIds = prevIds.filter(id => !assignedToIds.includes(id))
+      if (addedIds.length > 0 || removedIds.length > 0) {
+        entries.push({
+          field: 'přiřazení',
+          old_value: prevIds.map(id => members.find(m => m.id === id)?.name ?? '?').join(', ') || null,
+          new_value: assignedToIds.map(id => members.find(m => m.id === id)?.name ?? '?').join(', ') || null,
+        })
+      }
       await supabase.from('task_assignees').delete().eq('task_id', task.id)
       if (assignedToIds.length > 0) {
         await supabase.from('task_assignees').insert(assignedToIds.map(uid => ({ task_id: task.id, user_id: uid })))
       }
-      const newIds = assignedToIds.filter(id => !prevIds.includes(id))
-      for (const uid of newIds) {
+      for (const uid of addedIds) {
         await supabase.from('notifications').insert({
           user_id: uid, type: 'task_assigned',
           message: `Byl/a jsi přiřazen/a k úkolu: ${task.title}`,
           task_id: task.id, project_id: projectId,
         })
       }
+    }
+
+    if (entries.length > 0) {
+      await supabase.from('task_activity').insert(entries.map(e => ({ task_id: task.id, user_id: profile.id, ...e })))
+      refetchHistory()
+      queryClient.invalidateQueries({ queryKey: ['task-history', task.id] })
     }
 
     setSaving(false)
@@ -527,13 +561,29 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
           )}
 
           {activeTab === 'history' && (
-            <div className="space-y-2 max-h-48 overflow-y-auto">
+            <div className="space-y-0 max-h-64 overflow-y-auto">
               {history.length === 0 ? (
-                <p className="text-sm text-gray-400">Žádná historie.</p>
-              ) : history.map((h: { id: string; field: string; old_value: string | null; new_value: string | null; created_at: string; user?: { name: string } }) => (
-                <div key={h.id} className="text-xs text-gray-500 dark:text-gray-400 flex gap-2">
-                  <span className="text-gray-400">{formatDateTime(h.created_at)}</span>
-                  <span><strong>{h.user?.name}</strong> změnil <em>{h.field}</em>: {h.old_value ?? '–'} → {h.new_value ?? '–'}</span>
+                <p className="text-sm text-gray-400">Žádné záznamy o změnách.</p>
+              ) : (history as Array<{ id: string; field: string; old_value: string | null; new_value: string | null; created_at: string; user?: { name: string } }>).map(h => (
+                <div key={h.id} className="flex gap-3 py-2 border-b border-gray-50 dark:border-gray-800/60 last:border-0">
+                  <div className="w-6 h-6 rounded-full bg-indigo-50 dark:bg-indigo-900/30 flex items-center justify-center shrink-0 mt-0.5 text-indigo-500 dark:text-indigo-400">
+                    {h.field === 'stav' ? <CheckCircle size={12} /> : h.field === 'přiřazení' ? <span className="text-[10px] font-bold">@</span> : <span className="text-[10px]">✎</span>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-700 dark:text-gray-300 leading-snug">
+                      <span className="font-semibold">{h.user?.name ?? '?'}</span>
+                      {h.field === 'created'
+                        ? <span className="text-gray-500"> vytvořil/a úkol</span>
+                        : <> <span className="text-gray-500">změnil/a</span> <span className="font-medium">{h.field}</span></>
+                      }
+                    </p>
+                    {h.field !== 'created' && (h.old_value || h.new_value) && (
+                      <p className="text-[11px] text-gray-400 mt-0.5 truncate">
+                        {h.old_value ?? '–'} <span className="text-gray-300 dark:text-gray-600">→</span> {h.new_value ?? '–'}
+                      </p>
+                    )}
+                    <p className="text-[10px] text-gray-400 mt-0.5">{formatDateTime(h.created_at)}</p>
+                  </div>
                 </div>
               ))}
             </div>
@@ -605,15 +655,18 @@ function CreateTaskModal({ open, onClose, projectId, subprojects, members, defau
 
     setLoading(false)
     if (err) { setError(err.message); return }
-    if (newTask && assignedTo) {
-      await supabase.from('task_assignees').insert({ task_id: newTask.id, user_id: assignedTo })
-    }
-    if (assignedTo && assignedTo !== profile.id) {
-      await supabase.from('notifications').insert({
-        user_id: assignedTo, type: 'task_assigned',
-        message: `Byl/a jsi přiřazen/a k úkolu: ${newTask?.title}`,
-        task_id: newTask?.id, project_id: projectId,
-      })
+    if (newTask) {
+      await supabase.from('task_activity').insert({ task_id: newTask.id, user_id: profile.id, field: 'created', old_value: null, new_value: newTask.title })
+      if (assignedTo) {
+        await supabase.from('task_assignees').insert({ task_id: newTask.id, user_id: assignedTo })
+      }
+      if (assignedTo && assignedTo !== profile.id) {
+        await supabase.from('notifications').insert({
+          user_id: assignedTo, type: 'task_assigned',
+          message: `Byl/a jsi přiřazen/a k úkolu: ${newTask.title}`,
+          task_id: newTask.id, project_id: projectId,
+        })
+      }
     }
     toast.success('Úkol vytvořen!')
     onCreated(); onClose()
@@ -1300,19 +1353,32 @@ export function ProjectPage() {
     if (!profile) return
     const old = tasks.find(t => t.id === taskId)
     await supabase.from('tasks').update({ status: val, updated_by: profile.id }).eq('id', taskId)
-    if (old) await supabase.from('task_activity').insert({ task_id: taskId, user_id: profile.id, field: 'status', old_value: old.status, new_value: val })
+    if (old && old.status !== val) {
+      await supabase.from('task_activity').insert({ task_id: taskId, user_id: profile.id, field: 'stav', old_value: STATUS_LABELS[old.status], new_value: STATUS_LABELS[val] })
+      queryClient.invalidateQueries({ queryKey: ['task-history', taskId] })
+    }
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
   async function handlePriorityChange(taskId: string, val: TaskPriority) {
     if (!profile) return
+    const old = tasks.find(t => t.id === taskId)
     await supabase.from('tasks').update({ priority: val, updated_by: profile.id }).eq('id', taskId)
+    if (old && old.priority !== val) {
+      await supabase.from('task_activity').insert({ task_id: taskId, user_id: profile.id, field: 'priorita', old_value: PRIORITY_LABELS[old.priority], new_value: PRIORITY_LABELS[val] })
+      queryClient.invalidateQueries({ queryKey: ['task-history', taskId] })
+    }
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
   async function handleDueDateChange(taskId: string, val: string | null) {
     if (!profile) return
+    const old = tasks.find(t => t.id === taskId)
     await supabase.from('tasks').update({ due_date: val, updated_by: profile.id }).eq('id', taskId)
+    if (old && old.due_date !== val) {
+      await supabase.from('task_activity').insert({ task_id: taskId, user_id: profile.id, field: 'termín', old_value: formatDate(old.due_date), new_value: formatDate(val) })
+      queryClient.invalidateQueries({ queryKey: ['task-history', taskId] })
+    }
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
 
@@ -1342,6 +1408,8 @@ export function ProjectPage() {
 
     const isDraggingSelection = selectedTaskIds.size > 1 && selectedTaskIds.has(activeId)
 
+    const targetSubName = subprojects.find(s => s.id === targetSubId)?.name ?? 'Bez podprojektu'
+
     if (isDraggingSelection) {
       // Multi-task move — append all selected tasks to target group in their current order
       const orderedSelected = tasks.filter(t => selectedTaskIds.has(t.id))
@@ -1351,6 +1419,15 @@ export function ProjectPage() {
         supabase.from('tasks').update({ subproject_id: targetSubId, sort_order: maxOrder + (i + 1) * 10 }).eq('id', t.id)
       )
       await Promise.all(updates)
+      const movedCross = orderedSelected.filter(t => (t.subproject_id ?? null) !== targetSubId)
+      if (movedCross.length > 0 && profile) {
+        await supabase.from('task_activity').insert(movedCross.map(t => ({
+          task_id: t.id, user_id: profile.id, field: 'podprojekt',
+          old_value: subprojects.find(s => s.id === (t.subproject_id ?? null))?.name ?? 'Bez podprojektu',
+          new_value: targetSubName,
+        })))
+        movedCross.forEach(t => queryClient.invalidateQueries({ queryKey: ['task-history', t.id] }))
+      }
       setSelectedTaskIds(new Set())
     } else {
       const activeSubId = activeTask.subproject_id ?? null
@@ -1359,6 +1436,10 @@ export function ProjectPage() {
         const targetTasks = tasks.filter(t => (t.subproject_id ?? null) === targetSubId)
         const maxOrder = targetTasks.length > 0 ? Math.max(...targetTasks.map(t => t.sort_order ?? 0)) : 0
         await supabase.from('tasks').update({ subproject_id: targetSubId, sort_order: maxOrder + 10 }).eq('id', activeId)
+        if (profile) {
+          await supabase.from('task_activity').insert({ task_id: activeId, user_id: profile.id, field: 'podprojekt', old_value: subprojects.find(s => s.id === activeSubId)?.name ?? 'Bez podprojektu', new_value: targetSubName })
+          queryClient.invalidateQueries({ queryKey: ['task-history', activeId] })
+        }
       } else {
         // Same subproject — reorder
         const subTasks = tasks.filter(t => (t.subproject_id ?? null) === activeSubId)
@@ -1434,17 +1515,28 @@ export function ProjectPage() {
 
     const { data: current } = await supabase.from('task_assignees').select('user_id').eq('task_id', taskId)
     const prevIds = (current ?? []).map(r => r.user_id)
-    const newIds  = assigneeIds.filter(id => !prevIds.includes(id) && id !== profile.id)
+    const newNotifyIds = assigneeIds.filter(id => !prevIds.includes(id) && id !== profile.id)
 
     await supabase.from('tasks').update({ assigned_to, updated_by: profile.id }).eq('id', taskId)
     await supabase.from('task_assignees').delete().eq('task_id', taskId)
     if (assigneeIds.length > 0)
       await supabase.from('task_assignees').insert(assigneeIds.map(uid => ({ task_id: taskId, user_id: uid })))
 
-    if (newIds.length > 0) {
+    const sortedPrev = [...prevIds].sort().join(',')
+    const sortedNew  = [...assigneeIds].sort().join(',')
+    if (sortedPrev !== sortedNew) {
+      await supabase.from('task_activity').insert({
+        task_id: taskId, user_id: profile.id, field: 'přiřazení',
+        old_value: prevIds.map(id => members.find(m => m.id === id)?.name ?? '?').join(', ') || null,
+        new_value: assigneeIds.map(id => members.find(m => m.id === id)?.name ?? '?').join(', ') || null,
+      })
+      queryClient.invalidateQueries({ queryKey: ['task-history', taskId] })
+    }
+
+    if (newNotifyIds.length > 0) {
       const taskTitle = tasks.find(t => t.id === taskId)?.title ?? ''
       await supabase.from('notifications').insert(
-        newIds.map(uid => ({ user_id: uid, type: 'task_assigned', message: `Byl/a jsi přiřazen/a k úkolu: ${taskTitle}`, task_id: taskId, project_id: projectId }))
+        newNotifyIds.map(uid => ({ user_id: uid, type: 'task_assigned', message: `Byl/a jsi přiřazen/a k úkolu: ${taskTitle}`, task_id: taskId, project_id: projectId }))
       )
     }
 
