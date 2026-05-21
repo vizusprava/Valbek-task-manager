@@ -7,37 +7,38 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useAuthStore, applyUserBg } from '@/stores/authStore'
+import { LIGHT_THEMES, DARK_THEMES } from '@/lib/themes'
 import { supabase } from '@/lib/supabase'
 import { Avatar } from '@/components/ui/Avatar'
 import { ProfileModal } from '@/components/layout/ProfileModal'
 import { formatDateTime } from '@/lib/utils'
 import type { Notification } from '@/lib/types'
 
-const LIGHT_THEMES = [
-  { key: '#f9fafb', label: 'Klasická',   desc: 'Neutrální šedá' },
-  { key: '#fdf6ed', label: 'Teplá',      desc: 'Krémová' },
-  { key: '#eef2ff', label: 'Chladná',    desc: 'Jemná indigová' },
-] as const
-
-const DARK_THEMES = [
-  { key: '#030712', label: 'Noční',      desc: 'Hluboká černá' },
-  { key: '#0d1526', label: 'Navy',       desc: 'Námořní modrá' },
-  { key: '#1c1c1e', label: 'Grafitová',  desc: 'Teplá tmavá' },
-] as const
-
-function ThemeSwatch({ bg, label, desc, selected, onClick }: {
-  bg: string; label: string; desc: string; selected: boolean; onClick: () => void
+function ThemeSwatch({ bg, accentHex, label, desc, selected, onClick }: {
+  bg: string; accentHex: string; label: string; desc: string; selected: boolean; onClick: () => void
 }) {
   return (
     <button
       onClick={onClick}
-      className={`relative flex flex-col items-center gap-1.5 p-1 rounded-xl transition-all ${selected ? 'ring-2 ring-indigo-500 ring-offset-2 dark:ring-offset-gray-900' : 'hover:scale-105'}`}
+      className={`relative flex flex-col items-center gap-1.5 p-1 rounded-xl transition-all ${selected ? 'ring-2 ring-offset-2 ring-offset-white dark:ring-offset-gray-900 scale-105' : 'hover:scale-105 opacity-80 hover:opacity-100'}`}
+      style={selected ? { '--tw-ring-color': accentHex } as React.CSSProperties : undefined}
     >
-      <div className="w-16 h-10 rounded-lg border border-black/10 shadow-sm" style={{ backgroundColor: bg }} />
+      {/* Mini app preview */}
+      <div className="w-18 h-12 rounded-lg border border-black/10 shadow-sm overflow-hidden flex flex-col gap-0.5 p-1.5" style={{ backgroundColor: bg }}>
+        <div className="w-full h-2 rounded-sm bg-black/10" />
+        <div className="flex gap-1 flex-1">
+          <div className="w-5 rounded-sm bg-black/8" />
+          <div className="flex-1 flex flex-col gap-0.5">
+            <div className="w-full h-1.5 rounded-sm" style={{ backgroundColor: accentHex + 'cc' }} />
+            <div className="w-3/4 h-1.5 rounded-sm bg-black/8" />
+            <div className="w-1/2 h-1.5 rounded-sm bg-black/8" />
+          </div>
+        </div>
+      </div>
       <span className="text-xs font-medium text-gray-700 dark:text-gray-300 leading-none">{label}</span>
       <span className="text-[10px] text-gray-400 leading-none">{desc}</span>
       {selected && (
-        <div className="absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full bg-indigo-500 flex items-center justify-center">
+        <div className="absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full flex items-center justify-center" style={{ backgroundColor: accentHex }}>
           <svg viewBox="0 0 10 10" className="w-2 h-2 text-white" fill="none" stroke="currentColor" strokeWidth="1.8">
             <polyline points="1.5,5 4,7.5 8.5,2.5" />
           </svg>
@@ -49,31 +50,31 @@ function ThemeSwatch({ bg, label, desc, selected, onClick }: {
 
 function UserColorSettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { profile, setProfile } = useAuthStore()
-  const [lightColor, setLightColor] = useState(profile?.bg_light ?? '#f9fafb')
-  const [darkColor,  setDarkColor]  = useState(profile?.bg_dark  ?? '#030712')
-  const [saving, setSaving] = useState(false)
+  const [lightBg, setLightBg] = useState(profile?.bg_light ?? '#f9fafb')
+  const [darkBg,  setDarkBg]  = useState(profile?.bg_dark  ?? '#030712')
+  const [saving,  setSaving]  = useState(false)
 
   useEffect(() => {
     if (open) {
-      setLightColor(profile?.bg_light ?? '#f9fafb')
-      setDarkColor(profile?.bg_dark  ?? '#030712')
+      setLightBg(profile?.bg_light ?? '#f9fafb')
+      setDarkBg(profile?.bg_dark   ?? '#030712')
     }
   }, [open, profile?.bg_light, profile?.bg_dark])
 
-  function pickLight(hex: string) {
-    setLightColor(hex)
-    document.documentElement.style.setProperty('--user-bg-light', hex)
+  function pickLight(bg: string) {
+    setLightBg(bg)
+    applyUserBg({ ...profile, bg_light: bg, bg_dark: darkBg } as typeof profile)
   }
 
-  function pickDark(hex: string) {
-    setDarkColor(hex)
-    document.documentElement.style.setProperty('--user-bg-dark', hex)
+  function pickDark(bg: string) {
+    setDarkBg(bg)
+    applyUserBg({ ...profile, bg_light: lightBg, bg_dark: bg } as typeof profile)
   }
 
   async function handleSave() {
     if (!profile) return
     setSaving(true)
-    const updates = { bg_light: lightColor, bg_dark: darkColor }
+    const updates = { bg_light: lightBg, bg_dark: darkBg }
     await supabase.from('profiles').update(updates).eq('id', profile.id)
     const updated = { ...profile, ...updates }
     setProfile(updated)
@@ -91,12 +92,9 @@ function UserColorSettingsModal({ open, onClose }: { open: boolean; onClose: () 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={handleClose}>
-      <div
-        className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-xs p-6 space-y-5"
-        onClick={e => e.stopPropagation()}
-      >
+      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-xs p-6 space-y-5" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Motiv pozadí</h2>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Motiv aplikace</h2>
           <button onClick={handleClose} className="p-1 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800">
             <X size={16} />
           </button>
@@ -106,8 +104,8 @@ function UserColorSettingsModal({ open, onClose }: { open: boolean; onClose: () 
           <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Světlý režim</p>
           <div className="flex justify-between">
             {LIGHT_THEMES.map(t => (
-              <ThemeSwatch key={t.key} bg={t.key} label={t.label} desc={t.desc}
-                selected={lightColor === t.key} onClick={() => pickLight(t.key)} />
+              <ThemeSwatch key={t.bg} bg={t.bg} accentHex={t.accentHex} label={t.label} desc={t.desc}
+                selected={lightBg === t.bg} onClick={() => pickLight(t.bg)} />
             ))}
           </div>
         </div>
@@ -116,8 +114,8 @@ function UserColorSettingsModal({ open, onClose }: { open: boolean; onClose: () 
           <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Tmavý režim</p>
           <div className="flex justify-between">
             {DARK_THEMES.map(t => (
-              <ThemeSwatch key={t.key} bg={t.key} label={t.label} desc={t.desc}
-                selected={darkColor === t.key} onClick={() => pickDark(t.key)} />
+              <ThemeSwatch key={t.bg} bg={t.bg} accentHex={t.accentHex} label={t.label} desc={t.desc}
+                selected={darkBg === t.bg} onClick={() => pickDark(t.bg)} />
             ))}
           </div>
         </div>
@@ -159,6 +157,7 @@ export function Navbar({ onCreateProject, onCreateUser, onManageTemplates }: Nav
     setDark(next)
     document.documentElement.classList.toggle('dark', next)
     localStorage.setItem('theme', next ? 'dark' : 'light')
+    applyUserBg(profile)
   }
 
   async function loadNotifs() {

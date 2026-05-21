@@ -2,19 +2,19 @@ import { create } from 'zustand'
 import type { User } from '@supabase/supabase-js'
 import type { Profile } from '@/lib/types'
 import { supabase } from '@/lib/supabase'
+import { getAccentForBg } from '@/lib/themes'
 
 export function applyUserBg(profile: Profile | null) {
   const root = document.documentElement
-  if (profile?.bg_light) {
-    root.style.setProperty('--user-bg-light', profile.bg_light)
-  } else {
-    root.style.removeProperty('--user-bg-light')
-  }
-  if (profile?.bg_dark) {
-    root.style.setProperty('--user-bg-dark', profile.bg_dark)
-  } else {
-    root.style.removeProperty('--user-bg-dark')
-  }
+  const lightBg = profile?.bg_light ?? '#f9fafb'
+  const darkBg  = profile?.bg_dark  ?? '#030712'
+
+  root.style.setProperty('--user-bg-light', lightBg)
+  root.style.setProperty('--user-bg-dark',  darkBg)
+
+  const isDark = root.classList.contains('dark')
+  const accent = getAccentForBg(isDark ? darkBg : lightBg)
+  root.setAttribute('data-accent', accent)
 }
 
 interface AuthState {
