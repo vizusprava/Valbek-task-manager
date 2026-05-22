@@ -2,14 +2,14 @@ import { useState, useRef, Suspense, useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, useGLTF, Environment, Html, useProgress, GizmoHelper, GizmoViewcube } from '@react-three/drei'
+import { OrbitControls, useGLTF, Environment, Html, useProgress, GizmoHelper, GizmoViewcube, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { PageLayout } from '@/components/layout/PageLayout'
-import { Upload, X, Box, Trash2, Grid3x3, Eye, EyeOff, Layers, PanelRight, MessageSquarePlus, Leaf } from 'lucide-react'
+import { Upload, X, Box, Trash2, Grid3x3, Eye, EyeOff, Layers, PanelRight, MessageSquarePlus, Leaf, Camera, Ruler } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ModelFile, ModelAnnotation, ModelObjectColor } from '@/lib/types'
 
@@ -497,6 +497,82 @@ function FlyCamera({ speedRef, onFlyChange }: {
   return null
 }
 
+// ── Screenshot capture ────────────────────────────────────────
+
+function ScreenshotCapture({ glRef }: { glRef: { current: THREE.WebGLRenderer | null } }) {
+  const { gl } = useThree()
+  useEffect(() => { glRef.current = gl }, [gl, glRef])
+  return null
+}
+
+// ── Measurement tool ──────────────────────────────────────────
+
+function MeasureTool({ active }: { active: boolean }) {
+  const { camera, gl, scene } = useThree()
+  const [pts, setPts] = useState<THREE.Vector3[]>([])
+  const ptsRef = useRef<THREE.Vector3[]>([])
+
+  useEffect(() => {
+    if (!active) { ptsRef.current = []; setPts([]) }
+  }, [active])
+
+  useEffect(() => {
+    if (!active) return
+    const canvas = gl.domElement
+    const rc = new THREE.Raycaster()
+
+    function onClick(e: MouseEvent) {
+      if (e.detail !== 1) return // ignore dblclick
+      const rect = canvas.getBoundingClientRect()
+      const x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1
+      const y = -((e.clientY - rect.top)  / rect.height) * 2 + 1
+      rc.setFromCamera(new THREE.Vector2(x, y), camera)
+      const meshes: THREE.Object3D[] = []
+      scene.traverse(o => { if ((o as THREE.Mesh).isMesh) meshes.push(o) })
+      const hits = rc.intersectObjects(meshes, false)
+      if (hits.length === 0) return
+      const current = ptsRef.current
+      const next = current.length >= 2 ? [hits[0].point.clone()] : [...current, hits[0].point.clone()]
+      ptsRef.current = next
+      setPts([...next])
+    }
+
+    canvas.addEventListener('click', onClick)
+    return () => canvas.removeEventListener('click', onClick)
+  }, [active, camera, gl, scene])
+
+  if (!active || pts.length === 0) return null
+
+  const mid = pts.length === 2
+    ? new THREE.Vector3().addVectors(pts[0], pts[1]).multiplyScalar(0.5)
+    : null
+  const dist = pts.length === 2 ? pts[0].distanceTo(pts[1]) : null
+
+  const sphereScale = 0.06
+
+  return (
+    <group>
+      {pts.map((p, i) => (
+        <mesh key={i} position={p}>
+          <sphereGeometry args={[sphereScale, 16, 16]} />
+          <meshBasicMaterial color="#f97316" depthTest={false} />
+        </mesh>
+      ))}
+      {pts.length === 2 && mid && dist !== null && (
+        <>
+          <Line points={[pts[0].toArray() as [number,number,number], pts[1].toArray() as [number,number,number]]}
+            color="#f97316" lineWidth={2} depthTest={false} />
+          <Html position={mid} center>
+            <div className="bg-gray-900/90 text-orange-400 text-xs font-mono font-semibold px-2 py-1 rounded border border-orange-500/40 whitespace-nowrap pointer-events-none select-none">
+              {dist < 1 ? `${(dist * 100).toFixed(1)} cm` : `${dist.toFixed(3)} m`}
+            </div>
+          </Html>
+        </>
+      )}
+    </group>
+  )
+}
+
 // ── Camera rig (preset views) ─────────────────────────────────
 
 function CameraRig({ commandRef, boundsRef }: {
@@ -822,10 +898,12 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
   const [pendingPin,        setPendingPin]        = useState<THREE.Vector3 | null>(null)
   const [pendingText,       setPendingText]       = useState('')
   const [pendingObjectName, setPendingObjectName] = useState('')
-  const [flyMode,  setFlyMode]  = useState(false)
-  const [flySpeed, setFlySpeed] = useState(10)
-  const flySpeedRef      = useRef(flySpeed)
-  const meshMapRef       = useRef<Map<string, THREE.Mesh>>(new Map())
+  const [flyMode,     setFlyMode]     = useState(false)
+  const [flySpeed,    setFlySpeed]    = useState(10)
+  const [measureMode, setMeasureMode] = useState(false)
+  const flySpeedRef = useRef(flySpeed)
+  const glRef       = useRef<THREE.WebGLRenderer | null>(null)
+  const meshMapRef  = useRef<Map<string, THREE.Mesh>>(new Map())
   const cameraCommandRef = useRef<((v: string) => void) | null>(null)
   const boundsRef        = useRef<THREE.Box3 | null>(null)
   const colorSaveTimer   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -1059,6 +1137,29 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
             <span className="hidden sm:inline">Poznámka <span style={{ opacity: 0.6, fontSize: 10 }}>(P)</span></span>
           </button>
           <button
+            onClick={() => setMeasureMode(m => !m)}
+            title="Měřicí nástroj — klikni 2 body na modelu"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${measureMode ? 'bg-orange-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
+          >
+            <Ruler size={14} />
+            <span className="hidden sm:inline">Měřit</span>
+          </button>
+          <button
+            onClick={() => {
+              if (!glRef.current) return
+              const url = glRef.current.domElement.toDataURL('image/png')
+              const a = document.createElement('a')
+              a.href = url
+              a.download = `model-${Date.now()}.png`
+              a.click()
+            }}
+            title="Uložit screenshot"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+          >
+            <Camera size={14} />
+            <span className="hidden sm:inline">Screenshot</span>
+          </button>
+          <button
             onClick={() => setVegOpen(o => !o)}
             title="Vegetace"
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${vegOpen ? 'bg-green-700 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
@@ -1083,9 +1184,10 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
       {/* Body */}
       <div className="flex-1 flex overflow-hidden">
         {/* Canvas */}
-        <div className="flex-1 relative" style={{ cursor: annotationMode ? 'crosshair' : (vegOpen && vegPlaceMode === 'click' && vegType !== 'grass') ? 'cell' : 'default' }}>
+        <div className="flex-1 relative" style={{ cursor: annotationMode ? 'crosshair' : measureMode ? 'crosshair' : (vegOpen && vegPlaceMode === 'click' && vegType !== 'grass') ? 'cell' : 'default' }}>
           <Canvas
             camera={{ position: [9999, 9999, 9999], fov: 45, near: 0.001, far: 1_000_000 }}
+            gl={{ preserveDrawingBuffer: true }}
             onPointerMissed={clearSelection}
           >
             <ambientLight intensity={0.6} />
@@ -1128,6 +1230,8 @@ function Viewer({ url, name, modelId, onClose }: { url: string; name: string; mo
             <CameraNearFarSync />
             <FocusTarget disabled={flyMode || annotationMode || (vegOpen && vegPlaceMode === 'click' && vegType !== 'grass')} />
             <FlyCamera speedRef={flySpeedRef} onFlyChange={setFlyMode} />
+            <MeasureTool active={measureMode} />
+            <ScreenshotCapture glRef={glRef} />
             <GizmoHelper alignment="bottom-right" margin={[72, 72]}>
               <GizmoViewcube />
             </GizmoHelper>
