@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip, X, MoreHorizontal, CheckCircle, MapPin, ExternalLink, FileText, Download, ImageIcon } from 'lucide-react'
+import { Plus, Copy, ChevronDown, ChevronUp, ChevronRight, MessageSquare, Send, Trash2, GripVertical, Settings, Paperclip, X, MoreHorizontal, CheckCircle, MapPin, ExternalLink, FileText, Download } from 'lucide-react'
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors, DragOverlay, useDroppable,
   type DragEndEvent, type DragStartEvent,
