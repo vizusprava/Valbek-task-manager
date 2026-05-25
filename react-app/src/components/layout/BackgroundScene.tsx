@@ -157,8 +157,6 @@ function VegetationLayerHolo({ groups }: { groups: VegGroup[] }) {
 }
 
 // ── Hologram model ────────────────────────────────────────────
-interface BgModelColors { object_name: string; color: string }
-
 function HoloModel({ url, vegGroups }: { url: string; vegGroups: VegGroup[] }) {
   const { scene: src } = useGLTF(url)
   const { camera } = useThree()
