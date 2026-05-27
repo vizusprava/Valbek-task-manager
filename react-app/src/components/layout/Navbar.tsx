@@ -3,7 +3,7 @@ import logoUrl from '@/assets/logo.png'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
-  Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes,
+  Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes, Lightbulb,
   type LucideIcon,
 } from 'lucide-react'
 import { useAuthStore, applyUserBg } from '@/stores/authStore'
@@ -238,6 +238,7 @@ export function Navbar() {
         {navItem('/models',     '3D Modely',      Boxes)}
         {admin && navItem('/review',  'Ke kontrole', ClipboardCheck, reviewCount)}
         {navItem('/reports',    'Reporty',        BarChart2)}
+        {navItem('/inspiration', 'Inspirace',     Lightbulb)}
 
       </nav>
 

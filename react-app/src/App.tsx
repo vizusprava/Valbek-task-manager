@@ -12,6 +12,7 @@ import { ReviewPage } from '@/pages/ReviewPage'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { ThreeDMaxPage } from '@/pages/ThreeDMaxPage'
 import { ModelsPage } from '@/pages/ModelsPage'
+import { InspiracePage } from '@/pages/InspiracePage'
 import { ConfirmDialogProvider } from '@/components/ui/ConfirmDialog'
 
 const queryClient = new QueryClient({
@@ -79,6 +80,7 @@ export default function App() {
           <Route path="/models" element={<AuthGuard><ModelsPage /></AuthGuard>} />
           <Route path="/review" element={<AuthGuard><AdminGuard><ReviewPage /></AdminGuard></AuthGuard>} />
           <Route path="/reports" element={<AuthGuard><ReportsPage /></AuthGuard>} />
+          <Route path="/inspiration" element={<AuthGuard><InspiracePage /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </HashRouter>
