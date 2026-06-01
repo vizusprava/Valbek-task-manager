@@ -1789,6 +1789,7 @@ export function ModelsPage() {
   const [uploadDesc, setUploadDesc]       = useState('')
   const [uploadFile, setUploadFile]       = useState<File | null>(null)
   const [assigningModelId, setAssigningModelId] = useState<string | null>(null)
+  const [uploadProjectId, setUploadProjectId]   = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const { data: projects = [] } = useQuery({
@@ -1885,6 +1886,7 @@ export function ModelsPage() {
         file_path: path,
         thumbnail_path: thumbnailPath,
         file_size: uploadFile.size,
+        project_id: uploadProjectId || null,
         created_by: profile.id,
       })
       if (dbErr) throw dbErr
@@ -1895,6 +1897,7 @@ export function ModelsPage() {
       setUploadFile(null)
       setUploadName('')
       setUploadDesc('')
+      setUploadProjectId('')
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Chyba při nahrávání')
     } finally {
@@ -2077,6 +2080,15 @@ export function ModelsPage() {
               rows={2}
               className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
             />
+
+            <select
+              value={uploadProjectId}
+              onChange={e => setUploadProjectId(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">— bez projektu —</option>
+              {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
 
             <button
               onClick={handleUpload}
