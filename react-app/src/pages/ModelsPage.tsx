@@ -609,6 +609,51 @@ function ScreenshotCapture({ takeFnRef, annotations, annotationsVisible, hiddenA
   return null
 }
 
+// ── Camera persist (save / restore per model) ─────────────────
+
+function CameraPersist({ modelId, boundsRef, saveFnRef }: {
+  modelId: string
+  boundsRef: { current: THREE.Box3 | null }
+  saveFnRef: { current: (() => HTMLCanvasElement) | null }
+}) {
+  const { camera, controls, gl } = useThree()
+  const restoredRef = useRef(false)
+
+  useFrame(() => {
+    if (restoredRef.current || !boundsRef.current || !controls) return
+    restoredRef.current = true
+    const raw = localStorage.getItem(`model_cam_${modelId}`)
+    if (!raw) return
+    try {
+      const { px, py, pz, tx, ty, tz } = JSON.parse(raw)
+      camera.position.set(px, py, pz)
+      ;(controls as any).target.set(tx, ty, tz)
+      ;(controls as any).update()
+    } catch {}
+  })
+
+  useEffect(() => {
+    saveFnRef.current = () => {
+      const ctrl = controls as any
+      if (ctrl?.target) {
+        localStorage.setItem(`model_cam_${modelId}`, JSON.stringify({
+          px: camera.position.x, py: camera.position.y, pz: camera.position.z,
+          tx: ctrl.target.x, ty: ctrl.target.y, tz: ctrl.target.z,
+        }))
+      }
+      const src = gl.domElement
+      const W = 480, H = Math.round(W * src.height / src.width)
+      const tmp = document.createElement('canvas')
+      tmp.width = W; tmp.height = H
+      tmp.getContext('2d')?.drawImage(src, 0, 0, W, H)
+      return tmp
+    }
+    return () => { saveFnRef.current = null }
+  }, [camera, controls, gl, modelId, saveFnRef])
+
+  return null
+}
+
 // ── Measurement tool ──────────────────────────────────────────
 
 function MeasureTool({ active }: { active: boolean }) {
@@ -1055,11 +1100,13 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
   const [flySpeed,    setFlySpeed]    = useState(10)
   const [measureMode, setMeasureMode] = useState(false)
   const flySpeedRef = useRef(flySpeed)
-  const takeFnRef   = useRef<(() => void) | null>(null)
-  const meshMapRef  = useRef<Map<string, THREE.Mesh>>(new Map())
+  const takeFnRef      = useRef<(() => void) | null>(null)
+  const cameraSaveRef  = useRef<(() => HTMLCanvasElement) | null>(null)
+  const meshMapRef     = useRef<Map<string, THREE.Mesh>>(new Map())
   const cameraCommandRef = useRef<((v: string) => void) | null>(null)
   const boundsRef        = useRef<THREE.Box3 | null>(null)
   const colorSaveTimer   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const queryClient      = useQueryClient()
 
   const { data: savedColors = [] } = useQuery({
     queryKey: ['model_object_colors', modelId],
@@ -1131,7 +1178,7 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
       if (e.key === 'Escape') {
         if (pendingPin) { setPendingPin(null); return }
         if (annotationMode) { setAnnotationMode(false); return }
-        onClose()
+        handleClose()
       }
       if (e.key === 'p' || e.key === 'P') {
         if (pendingPin) return
@@ -1141,6 +1188,22 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose, pendingPin, annotationMode])
+
+  function handleClose() {
+    const canvas = cameraSaveRef.current?.()
+    onClose()
+    if (canvas) {
+      canvas.toBlob(async (blob) => {
+        if (!blob) return
+        const path = `thumbnails/${modelId}.jpg`
+        const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { upsert: true, contentType: 'image/jpeg' })
+        if (!error) {
+          await supabase.from('model_files').update({ thumbnail_path: path }).eq('id', modelId)
+          queryClient.invalidateQueries({ queryKey: ['models'] })
+        }
+      }, 'image/jpeg', 0.88)
+    }
+  }
 
   function handleMeshSelect(mesh: THREE.Mesh) {
     if (selectedMesh && selectedMesh.uuid !== mesh.uuid)
@@ -1321,7 +1384,7 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
             <PanelRight size={14} />
             <span className="hidden sm:inline">Scéna</span>
           </button>
-          <button onClick={onClose} className="p-1.5 rounded-md text-gray-400 hover:text-white hover:bg-gray-800 transition-colors">
+          <button onClick={handleClose} className="p-1.5 rounded-md text-gray-400 hover:text-white hover:bg-gray-800 transition-colors">
             <X size={18} />
           </button>
         </div>
@@ -1379,6 +1442,7 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
             <MeasureTool active={measureMode} />
             <FlyToAnnotation pos={focusAnnotationPos ?? null} boundsRef={boundsRef} />
             <ScreenshotCapture takeFnRef={takeFnRef} annotations={annotations} annotationsVisible={annotationsVisible} hiddenAnnotationIds={hiddenAnnotationIds} />
+            <CameraPersist modelId={modelId} boundsRef={boundsRef} saveFnRef={cameraSaveRef} />
             <GizmoHelper alignment="bottom-right" margin={[72, 72]}>
               <GizmoViewcube />
             </GizmoHelper>
