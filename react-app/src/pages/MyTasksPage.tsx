@@ -80,7 +80,7 @@ function TaskDetailModal({ task, onClose, onSaved }: {
       setStatus(task.status); setPriority(task.priority)
       setDueDate(task.due_date ?? ''); setDesc(task.description ?? '')
       setAnnotationId(task.annotation_id ?? null)
-      setAnnModelId(task.annotation?.model_id ?? '')
+      setAnnModelId(task.annotation?.model_id ?? task.linked_model?.id ?? '')
       setAnnPickerOpen(false)
       setError(''); setComment(''); setAttachedImages([])
     }
@@ -101,7 +101,7 @@ function TaskDetailModal({ task, onClose, onSaved }: {
       const { data } = await supabase.from('model_annotations').select('id, text, object_name').eq('model_id', annModelId).order('created_at')
       return (data || []) as { id: string; text: string; object_name: string | null }[]
     },
-    enabled: !!annModelId && annPickerOpen,
+    enabled: !!annModelId,
   })
 
   const { data: comments = [], refetch: refetchComments } = useQuery<Comment[]>({
@@ -128,6 +128,7 @@ function TaskDetailModal({ task, onClose, onSaved }: {
     setSaving(true); setError('')
     const { error: err } = await supabase.from('tasks').update({
       status, priority, due_date: dueDate || null, description: desc || null,
+      model_id: annModelId || null,
       annotation_id: annotationId || null, updated_by: profile.id,
     }).eq('id', task.id)
     setSaving(false)
@@ -223,34 +224,36 @@ function TaskDetailModal({ task, onClose, onSaved }: {
           </div>
         </div>
 
-        {/* 3D Annotation link */}
+        {/* 3D Model / Annotation link */}
         {canEdit ? (
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Odkaz na 3D anotaci</label>
-              {annotationId && (
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Odkaz na 3D model</label>
+              {annModelId && (
                 <button type="button" onClick={() => { setAnnotationId(null); setAnnModelId(''); setAnnPickerOpen(false) }}
                   className="text-xs text-gray-400 hover:text-red-500 transition-colors">Zrušit</button>
               )}
             </div>
-            {annotationId ? (() => {
-              const dispAnn = annotationId === task.annotation_id ? task.annotation : pickerAnnotations.find(a => a.id === annotationId)
-              const dispModelName = annotationId === task.annotation_id ? (task.annotation?.model?.name ?? '') : (pickerModels.find(m => m.id === annModelId)?.name ?? '')
-              const linkModelId = annotationId === task.annotation_id ? (task.annotation?.model_id ?? annModelId) : annModelId
+            {annModelId ? (() => {
+              const dispModelName = task.annotation?.model?.name ?? task.linked_model?.name ?? (pickerModels.find(m => m.id === annModelId)?.name ?? annModelId)
+              const linkUrl = `/models?model=${annModelId}${annotationId ? `&annotation=${annotationId}` : ''}`
               return (
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-indigo-200/60 dark:border-indigo-700/40 bg-indigo-50/50 dark:bg-indigo-900/15">
-                  <MapPin size={13} className="text-indigo-500 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[11px] text-indigo-500 font-medium leading-none mb-0.5">
-                      {dispModelName}
-                      {dispAnn?.object_name && <span className="ml-1.5 text-indigo-400/80">· {dispAnn.object_name}</span>}
-                    </p>
-                    <p className="text-sm text-gray-700 dark:text-gray-300 truncate">{dispAnn?.text ?? ''}</p>
+                <div className="rounded-lg border border-indigo-200/60 dark:border-indigo-700/40 bg-indigo-50/50 dark:bg-indigo-900/15 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={13} className="text-indigo-500 shrink-0" />
+                    <span className="text-xs font-medium text-indigo-600 dark:text-indigo-400 flex-1 truncate">{dispModelName}</span>
+                    <Link to={linkUrl} onClick={onClose}
+                      className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium transition-colors">
+                      <ExternalLink size={11} /> Otevřít v 3D
+                    </Link>
                   </div>
-                  <Link to={`/models?model=${linkModelId}&annotation=${annotationId}`} onClick={onClose}
-                    className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium transition-colors">
-                    <ExternalLink size={12} /> Otevřít v 3D
-                  </Link>
+                  <select value={annotationId ?? ''} onChange={e => setAnnotationId(e.target.value || null)}
+                    className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <option value="">— bez anotace —</option>
+                    {pickerAnnotations.map(a => (
+                      <option key={a.id} value={a.id}>{a.object_name ? `[${a.object_name}] ` : ''}{a.text.slice(0, 80)}</option>
+                    ))}
+                  </select>
                 </div>
               )
             })() : (
@@ -258,40 +261,32 @@ function TaskDetailModal({ task, onClose, onSaved }: {
                 <button type="button" onClick={() => setAnnPickerOpen(v => !v)}
                   className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-colors ${annPickerOpen ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400' : 'border-dashed border-gray-300 dark:border-gray-600 text-gray-400 hover:border-indigo-400 hover:text-indigo-500'}`}>
                   <MapPin size={13} />
-                  {annPickerOpen ? 'Skrýt výběr' : 'Přidat odkaz na anotaci v modelu…'}
+                  {annPickerOpen ? 'Skrýt výběr' : 'Přidat odkaz na 3D model…'}
                 </button>
                 {annPickerOpen && (
-                  <div className="space-y-2 pl-1">
+                  <div className="pl-1">
                     <select value={annModelId} onChange={e => { setAnnModelId(e.target.value); setAnnotationId(null) }}
                       className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">
                       <option value="">— vyberte model —</option>
                       {pickerModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
-                    {annModelId && (
-                      <select value={annotationId ?? ''} onChange={e => setAnnotationId(e.target.value || null)}
-                        className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                        <option value="">— vyberte anotaci —</option>
-                        {pickerAnnotations.map(a => (
-                          <option key={a.id} value={a.id}>{a.object_name ? `[${a.object_name}] ` : ''}{a.text.slice(0, 80)}</option>
-                        ))}
-                      </select>
-                    )}
                   </div>
                 )}
               </div>
             )}
           </div>
-        ) : task.annotation ? (
+        ) : (task.annotation || task.linked_model) ? (
           <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-indigo-200/60 dark:border-indigo-700/40 bg-indigo-50/50 dark:bg-indigo-900/15">
             <MapPin size={15} className="text-indigo-500 shrink-0" />
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] text-indigo-500 font-medium leading-none mb-0.5">
-                {task.annotation.model?.name ?? 'Model'}
-                {task.annotation.object_name && <span className="ml-1.5 text-indigo-400/80">· {task.annotation.object_name}</span>}
+              <p className="text-xs text-indigo-500 font-medium truncate">
+                {task.annotation?.model?.name ?? task.linked_model?.name ?? 'Model'}
               </p>
-              <p className="text-sm text-gray-700 dark:text-gray-300 truncate">{task.annotation.text}</p>
+              {task.annotation && <p className="text-sm text-gray-700 dark:text-gray-300 truncate mt-0.5">{task.annotation.text}</p>}
             </div>
-            <Link to={`/models?model=${task.annotation.model_id}&annotation=${task.annotation.id}`} onClick={onClose}
+            <Link
+              to={`/models?model=${task.annotation?.model_id ?? task.linked_model?.id}${task.annotation ? `&annotation=${task.annotation.id}` : ''}`}
+              onClick={onClose}
               className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium transition-colors">
               <ExternalLink size={12} /> Otevřít v 3D
             </Link>
@@ -435,7 +430,7 @@ export function MyTasksPage() {
       if (taskIds.length === 0) return []
       const { data } = await supabase
         .from('tasks')
-        .select('*, comments(count), project:project_id(id, name), subproject:subproject_id(id, name), assigned:assigned_to(id, name, initials, color), creator:created_by(id, name), updater:updated_by(id, name), task_assignees(user_id, profiles(id, name, initials, color)), annotation:annotation_id(id, text, object_name, model_id, model:model_id(id, name))')
+        .select('*, comments(count), project:project_id(id, name), subproject:subproject_id(id, name), assigned:assigned_to(id, name, initials, color), creator:created_by(id, name), updater:updated_by(id, name), task_assignees(user_id, profiles(id, name, initials, color)), linked_model:model_id(id, name), annotation:annotation_id(id, text, object_name, model_id, model:model_id(id, name))')
         .in('id', taskIds)
         .order('title', { ascending: true })
       return (data || []) as TaskWithRelations[]
