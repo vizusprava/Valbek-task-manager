@@ -16,22 +16,24 @@ interface ProjectWithMembers extends Project {
 
 // ── Helpers ───────────────────────────────────────────────────
 
-const STATUS_ORDER = ['neudělano', 'rozpracováno', 'připraveno ke kontrole', 'hotovo'] as const
+const STATUS_ORDER = ['neudělano', 'rozpracováno', 'připraveno ke kontrole', 'schváleno', 'hotovo'] as const
 const STATUS_LABELS: Record<string, string> = {
   'neudělano': 'Neudělano',
   'rozpracováno': 'Rozpracováno',
   'připraveno ke kontrole': 'Ke kontrole',
+  'schváleno': 'Schváleno',
   'hotovo': 'Hotovo',
 }
 const STATUS_COLORS: Record<string, string> = {
   'neudělano': 'bg-gray-400',
   'rozpracováno': 'bg-blue-500',
   'připraveno ke kontrole': 'bg-yellow-500',
+  'schváleno': 'bg-teal-500',
   'hotovo': 'bg-green-500',
 }
 
 function isOverdue(task: Task) {
-  return task.due_date && task.status !== 'hotovo' && new Date(task.due_date) < new Date()
+  return task.due_date && task.status !== 'hotovo' && task.status !== 'schváleno' && new Date(task.due_date) < new Date()
 }
 
 function formatDate(d: string | null) {
@@ -100,7 +102,7 @@ function StatusBar({ tasks }: { tasks: Task[] }) {
 
 function ProjectCard({ project, tasks }: { project: ProjectWithMembers; tasks: Task[] }) {
   const total = tasks.length
-  const done  = tasks.filter(t => t.status === 'hotovo').length
+  const done  = tasks.filter(t => (t.status === 'hotovo' || t.status === 'schváleno')).length
   const overdue = tasks.filter(isOverdue).length
   const pct   = total === 0 ? 0 : Math.round((done / total) * 100)
 
@@ -174,7 +176,7 @@ function PersonTable({ tasks, profiles }: { tasks: Task[]; profiles: Profile[] }
       return {
         profile: p,
         total: mine.length,
-        done: mine.filter(t => t.status === 'hotovo').length,
+        done: mine.filter(t => (t.status === 'hotovo' || t.status === 'schváleno')).length,
         inProgress: mine.filter(t => t.status === 'rozpracováno').length,
         overdue: mine.filter(isOverdue).length,
         highPriority: mine.filter(t => t.priority === 'high' && t.status !== 'hotovo').length,
@@ -285,7 +287,7 @@ function PersonCategoryMatrix({ tasks, subprojects, profiles }: {
           {activeProfiles.map(p => {
             const allMine = tasks.filter(t => t.assigned_to === p.id)
             const catMine = allMine.filter(t => t.subproject_id)
-            const totalDone = catMine.filter(t => t.status === 'hotovo').length
+            const totalDone = catMine.filter(t => (t.status === 'hotovo' || t.status === 'schváleno')).length
             return (
               <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
                 <td className="py-2.5 pr-4 sticky left-0 bg-white dark:bg-gray-900 group-hover:bg-gray-50 z-10">
@@ -297,7 +299,7 @@ function PersonCategoryMatrix({ tasks, subprojects, profiles }: {
                 {categories.map(cat => {
                   const sameNameIds = subprojects.filter(s => s.name === cat).map(s => s.id)
                   const allCatTasks = tasks.filter(t => t.assigned_to === p.id && t.subproject_id && sameNameIds.includes(t.subproject_id))
-                  const done = allCatTasks.filter(t => t.status === 'hotovo').length
+                  const done = allCatTasks.filter(t => (t.status === 'hotovo' || t.status === 'schváleno')).length
                   if (allCatTasks.length === 0) return (
                     <td key={cat} className="py-2.5 px-3 text-center text-gray-300 dark:text-gray-700 text-xs">—</td>
                   )
@@ -371,7 +373,7 @@ export function ReportsPage() {
 
   // Overall stats
   const totalTasks  = allTasks.length
-  const doneTasks   = allTasks.filter(t => t.status === 'hotovo').length
+  const doneTasks   = allTasks.filter(t => (t.status === 'hotovo' || t.status === 'schváleno')).length
   const overdueTasks = allTasks.filter(isOverdue).length
   const activeProjects = projects.filter(p => p.status === 'aktivní').length
   const donePct = totalTasks === 0 ? 0 : Math.round((doneTasks / totalTasks) * 100)

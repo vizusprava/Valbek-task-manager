@@ -373,7 +373,7 @@ export function DashboardPage() {
       for (const t of data || []) {
         if (!byProject[t.project_id]) byProject[t.project_id] = { total: 0, done: 0, review: 0, inprog: 0, todo: 0 }
         byProject[t.project_id].total++
-        if (t.status === 'hotovo') byProject[t.project_id].done++
+        if (t.status === 'hotovo' || t.status === 'schváleno') byProject[t.project_id].done++
         else if (t.status === 'připraveno ke kontrole') byProject[t.project_id].review++
         else if (t.status === 'rozpracováno') byProject[t.project_id].inprog++
         else byProject[t.project_id].todo++

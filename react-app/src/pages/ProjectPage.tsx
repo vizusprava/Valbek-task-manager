@@ -413,7 +413,7 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
   }
 
   if (!task) return null
-  const overdue = isOverdue(task.due_date) && task.status !== 'hotovo'
+  const overdue = isOverdue(task.due_date) && task.status !== 'hotovo' && task.status !== 'schváleno'
 
   return (
     <>
@@ -1070,7 +1070,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id })
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }
-  const overdue = isOverdue(task.due_date) && task.status !== 'hotovo'
+  const overdue = isOverdue(task.due_date) && task.status !== 'hotovo' && task.status !== 'schváleno'
   const commentCount = task.comments?.[0]?.count ?? 0
 
   return (
@@ -1079,7 +1079,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
       onMouseDown={anySelected ? (e: React.MouseEvent) => { if (e.button === 0) { e.preventDefault(); onDragSelectStart(task.id) } } : undefined}
       onMouseEnter={anySelected ? (e: React.MouseEvent) => { if (e.buttons === 1) onDragSelectEnter(task.id) } : undefined}
       className={`group border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer select-none
-        ${selected ? 'bg-indigo-50 dark:bg-indigo-900/20' : task.status === 'hotovo' ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20' : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}
+        ${selected ? 'bg-indigo-50 dark:bg-indigo-900/20' : (task.status === 'hotovo' || task.status === 'schváleno') ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20' : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}
         ${isDragging ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}>
       <td className="pl-1.5 pr-1 py-2.5 w-12"
         onMouseDown={e => e.stopPropagation()}
@@ -1099,7 +1099,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
       </td>
       <td className="px-3 py-2.5">
         <div className="flex items-start gap-2">
-          <span className={`text-sm font-medium ${task.status === 'hotovo' ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>{task.title}</span>
+          <span className={`text-sm font-medium ${(task.status === 'hotovo' || task.status === 'schváleno') ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>{task.title}</span>
           {commentCount > 0 && (
             <span className="flex items-center gap-0.5 text-xs text-gray-400 shrink-0 mt-0.5"><MessageSquare size={11} />{commentCount}</span>
           )}
@@ -1179,7 +1179,7 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDrag
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const total = group.tasks.length
-  const done  = group.tasks.filter(t => t.status === 'hotovo').length
+  const done  = group.tasks.filter(t => t.status === 'hotovo' || t.status === 'schváleno').length
   const pct   = total > 0 ? Math.round((done / total) * 100) : 0
   const anySelected = selectedTaskIds.size > 0
   const allGroupSelected = total > 0 && group.tasks.every(t => selectedTaskIds.has(t.id))

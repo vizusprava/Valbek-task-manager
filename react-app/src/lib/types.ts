@@ -1,5 +1,5 @@
 export type Role = 'admin' | 'user'
-export type TaskStatus = 'neudělano' | 'rozpracováno' | 'připraveno ke kontrole' | 'hotovo'
+export type TaskStatus = 'neudělano' | 'rozpracováno' | 'připraveno ke kontrole' | 'schváleno' | 'hotovo'
 export type TaskPriority = 'low' | 'medium' | 'high'
 
 export interface Profile {

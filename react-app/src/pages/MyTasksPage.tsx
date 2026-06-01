@@ -156,7 +156,7 @@ function TaskDetailModal({ task, onClose, onSaved }: {
   }
 
   if (!task) return null
-  const overdue = isOverdue(task.due_date) && task.status !== 'hotovo'
+  const overdue = isOverdue(task.due_date) && task.status !== 'hotovo' && task.status !== 'schváleno'
 
   return (
     <>
@@ -393,15 +393,17 @@ function TaskDetailModal({ task, onClose, onSaved }: {
 type GroupBy = 'urgency' | 'project'
 
 const URGENCY_CONFIG: Record<string, { label: string; dot: string; text: string }> = {
-  overdue: { label: 'Po termínu', dot: 'bg-red-500',     text: 'text-red-600 dark:text-red-400' },
-  today:   { label: 'Dnes',       dot: 'bg-orange-500',  text: 'text-orange-600 dark:text-orange-400' },
-  week:    { label: 'Tento týden',dot: 'bg-indigo-500',  text: 'text-indigo-600 dark:text-indigo-400' },
-  later:   { label: 'Později',    dot: 'bg-gray-400',    text: 'text-gray-500 dark:text-gray-400' },
-  hotovo:  { label: 'Hotovo',     dot: 'bg-emerald-500', text: 'text-emerald-600 dark:text-emerald-400' },
+  overdue:   { label: 'Po termínu', dot: 'bg-red-500',     text: 'text-red-600 dark:text-red-400' },
+  today:     { label: 'Dnes',       dot: 'bg-orange-500',  text: 'text-orange-600 dark:text-orange-400' },
+  week:      { label: 'Tento týden',dot: 'bg-indigo-500',  text: 'text-indigo-600 dark:text-indigo-400' },
+  later:     { label: 'Později',    dot: 'bg-gray-400',    text: 'text-gray-500 dark:text-gray-400' },
+  schváleno: { label: 'Schváleno',  dot: 'bg-teal-500',    text: 'text-teal-600 dark:text-teal-400' },
+  hotovo:    { label: 'Hotovo',     dot: 'bg-emerald-500', text: 'text-emerald-600 dark:text-emerald-400' },
 }
 
 function urgencyKey(t: TaskWithRelations): string {
-  if (t.status === 'hotovo') return 'hotovo'
+  if (t.status === 'hotovo')    return 'hotovo'
+  if (t.status === 'schváleno') return 'schváleno'
   if (!t.due_date) return 'later'
   const today = new Date(); today.setHours(0, 0, 0, 0)
   const due   = new Date(t.due_date); due.setHours(0, 0, 0, 0)
@@ -484,7 +486,7 @@ export function MyTasksPage() {
 
   const filtered = useMemo(() => {
     let result = tasks
-    if (!showDone)      result = result.filter(t => t.status !== 'hotovo')
+    if (!showDone)      result = result.filter(t => t.status !== 'hotovo' && t.status !== 'schváleno')
     if (filterStatus)   result = result.filter(t => t.status === filterStatus)
     if (filterPriority) result = result.filter(t => t.priority === filterPriority)
     if (search) {
@@ -508,7 +510,7 @@ export function MyTasksPage() {
       }
       return Object.values(map)
     }
-    const order = ['overdue', 'today', 'week', 'later', 'hotovo']
+    const order = ['overdue', 'today', 'week', 'later', 'schváleno', 'hotovo']
     const map: Record<string, TaskWithRelations[]> = {}
     for (const t of filtered) {
       const k = urgencyKey(t)
@@ -646,12 +648,12 @@ export function MyTasksPage() {
                       return (
                         <tr key={t.id} onClick={() => setSelectedTask(t)}
                           className={`border-b border-gray-50 dark:border-gray-800 last:border-0 cursor-pointer
-                            ${t.status === 'hotovo' ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20'
+                            ${(t.status === 'hotovo' || t.status === 'schváleno') ? 'bg-emerald-50/60 hover:bg-emerald-50 dark:bg-emerald-900/10 dark:hover:bg-emerald-900/20'
                               : overdue ? 'bg-red-50/30 hover:bg-gray-50 dark:bg-red-900/5 dark:hover:bg-gray-800/50'
                               : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}`}>
                           <td className="px-4 py-3">
                             <div className="flex items-start gap-2">
-                              <span className={`font-medium ${t.status === 'hotovo' ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
+                              <span className={`font-medium ${(t.status === 'hotovo' || t.status === 'schváleno') ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
                                 {t.title}
                               </span>
                               {commentCount > 0 && (
