@@ -306,6 +306,7 @@ function PersonCategoryMatrix({ tasks, subprojects, profiles }: {
                   if (allCatTasks.length === 0) return (
                     <td key={cat} className="py-2.5 px-3 text-center text-gray-300 dark:text-gray-700 text-xs">—</td>
                   )
+                  const done = allCatTasks.filter(t => t.status === 'hotovo' || t.status === 'schváleno').length
                   const catWeightedSum = allCatTasks.reduce((s, t) => s + (STATUS_WEIGHTS[t.status as keyof typeof STATUS_WEIGHTS] ?? 10), 0)
                   const pct = Math.round(catWeightedSum / allCatTasks.length)
                   return (
