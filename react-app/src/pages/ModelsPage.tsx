@@ -1191,18 +1191,24 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
 
   function handleClose() {
     const canvas = cameraSaveRef.current?.()
+    // Capture old thumbnail path before closing (while cache is warm)
+    const oldThumbPath = (queryClient.getQueryData<ModelFile[]>(['model_files']) ?? [])
+      .find(m => m.id === modelId)?.thumbnail_path ?? null
     onClose()
-    if (canvas) {
-      canvas.toBlob(async (blob) => {
-        if (!blob) return
-        const path = `thumbs/${modelId}.jpg`
-        const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { upsert: true, contentType: 'image/jpeg' })
-        if (!error) {
-          await supabase.from('model_files').update({ thumbnail_path: path }).eq('id', modelId)
-          queryClient.invalidateQueries({ queryKey: ['model_files'] })
-        }
-      }, 'image/jpeg', 0.88)
-    }
+    if (!canvas) return
+    canvas.toBlob(async (blob) => {
+      if (!blob) return
+      // Unique filename every time — avoids browser/CDN cache serving stale image
+      const newPath = `thumbs/cam_${modelId}_${Date.now()}.jpg`
+      const { error } = await supabase.storage.from(BUCKET).upload(newPath, blob, { contentType: 'image/jpeg' })
+      if (error) return
+      await supabase.from('model_files').update({ thumbnail_path: newPath }).eq('id', modelId)
+      // Delete previous cam thumbnail to avoid accumulation
+      if (oldThumbPath && oldThumbPath !== newPath && oldThumbPath.includes(`cam_${modelId}`)) {
+        supabase.storage.from(BUCKET).remove([oldThumbPath])
+      }
+      queryClient.invalidateQueries({ queryKey: ['model_files'] })
+    }, 'image/jpeg', 0.88)
   }
 
   function handleMeshSelect(mesh: THREE.Mesh) {
