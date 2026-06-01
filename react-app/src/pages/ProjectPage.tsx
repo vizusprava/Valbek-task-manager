@@ -842,7 +842,6 @@ function CreateTaskModal({ open, onClose, projectId, subprojects, members, defau
     enabled: !!annModelId,
   })
 
-  const selectedAnnotation = annotationId ? pickerAnnotations.find(a => a.id === annotationId) : null
   const selectedModelName  = annModelId   ? pickerModels.find(m => m.id === annModelId)?.name ?? '' : ''
 
   useEffect(() => {
