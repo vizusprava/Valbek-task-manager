@@ -653,7 +653,7 @@ export function MyTasksPage() {
                               : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}`}>
                           <td className="px-4 py-3">
                             <div className="flex items-start gap-2">
-                              <span className={`font-medium ${(t.status === 'hotovo' || t.status === 'schváleno') ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
+                              <span className={`font-medium ${t.status === 'hotovo' ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
                                 {t.title}
                               </span>
                               {commentCount > 0 && (

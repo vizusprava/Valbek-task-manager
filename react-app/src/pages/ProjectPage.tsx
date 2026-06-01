@@ -1099,7 +1099,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
       </td>
       <td className="px-3 py-2.5">
         <div className="flex items-start gap-2">
-          <span className={`text-sm font-medium ${(task.status === 'hotovo' || task.status === 'schváleno') ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>{task.title}</span>
+          <span className={`text-sm font-medium ${task.status === 'hotovo' ? 'line-through text-emerald-700/60 dark:text-emerald-400/60' : overdue ? 'text-red-700 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>{task.title}</span>
           {commentCount > 0 && (
             <span className="flex items-center gap-0.5 text-xs text-gray-400 shrink-0 mt-0.5"><MessageSquare size={11} />{commentCount}</span>
           )}
