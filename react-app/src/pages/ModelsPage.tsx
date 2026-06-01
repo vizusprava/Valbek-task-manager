@@ -1191,22 +1191,17 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos }: { url: stri
 
   function handleClose() {
     const canvas = cameraSaveRef.current?.()
-    // Capture old thumbnail path before closing (while cache is warm)
-    const oldThumbPath = (queryClient.getQueryData<ModelFile[]>(['model_files']) ?? [])
-      .find(m => m.id === modelId)?.thumbnail_path ?? null
     onClose()
     if (!canvas) return
     canvas.toBlob(async (blob) => {
       if (!blob) return
-      // Unique filename every time — avoids browser/CDN cache serving stale image
-      const newPath = `thumbs/cam_${modelId}_${Date.now()}.jpg`
-      const { error } = await supabase.storage.from(BUCKET).upload(newPath, blob, { contentType: 'image/jpeg' })
+      // Fixed path per model — upsert overwrites, no accumulation
+      const path = `thumbs/cam_${modelId}.jpg`
+      const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { upsert: true, contentType: 'image/jpeg' })
       if (error) return
-      await supabase.from('model_files').update({ thumbnail_path: newPath }).eq('id', modelId)
-      // Delete previous cam thumbnail to avoid accumulation
-      if (oldThumbPath && oldThumbPath !== newPath && oldThumbPath.includes(`cam_${modelId}`)) {
-        supabase.storage.from(BUCKET).remove([oldThumbPath])
-      }
+      await supabase.from('model_files').update({ thumbnail_path: path }).eq('id', modelId)
+      // Cache-buster: store timestamp in localStorage so this browser sees fresh image
+      localStorage.setItem(`thumb_v_${modelId}`, Date.now().toString())
       queryClient.invalidateQueries({ queryKey: ['model_files'] })
     }, 'image/jpeg', 0.88)
   }
@@ -1969,9 +1964,11 @@ export function ModelsPage() {
                       className="group bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-lg transition-all"
                     >
                       <div className="h-40 bg-linear-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center overflow-hidden">
-                        {model.thumbnail_path ? (
-                          <img src={supabase.storage.from(BUCKET).getPublicUrl(model.thumbnail_path).data.publicUrl} alt={model.name} className="w-full h-full object-cover" />
-                        ) : (
+                        {model.thumbnail_path ? (() => {
+                          const base = supabase.storage.from(BUCKET).getPublicUrl(model.thumbnail_path).data.publicUrl
+                          const v = localStorage.getItem(`thumb_v_${model.id}`)
+                          return <img src={v ? `${base}?v=${v}` : base} alt={model.name} className="w-full h-full object-cover" />
+                        })() : (
                           <Box size={48} className="text-gray-300 dark:text-gray-700 group-hover:text-indigo-400 dark:group-hover:text-indigo-500 transition-colors" />
                         )}
                       </div>
