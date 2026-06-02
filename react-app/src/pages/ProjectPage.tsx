@@ -1575,7 +1575,6 @@ export function ProjectPage() {
   const [filterSubproject,setFilterSubproject]= useState('')
   const [search,          setSearch]          = useState('')
   const [selectedTaskId,  setSelectedTaskId]  = useState<string | null>(null)
-  const selectedTask = selectedTaskId ? (tasks.find(t => t.id === selectedTaskId) ?? null) : null
   const [showCreate,      setShowCreate]      = useState(false)
   const [createSubId,     setCreateSubId]     = useState('')
   const [showEditProject,       setShowEditProject]       = useState(false)
@@ -1647,6 +1646,8 @@ export function ProjectPage() {
     },
     enabled: !!projectId,
   })
+
+  const selectedTask = selectedTaskId ? (tasks.find(t => t.id === selectedTaskId) ?? null) : null
 
   // ── Realtime ───────────────────────────────────────────────
 
