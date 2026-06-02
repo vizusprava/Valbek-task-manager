@@ -364,6 +364,18 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
           task_id: task.id, project_id: projectId,
         })
       }
+    } else if (profile) {
+      // Non-admin: can only toggle own assignment
+      const prevIds = task.task_assignees?.map(a => a.user_id) ?? (task.assigned_to ? [task.assigned_to] : [])
+      const wasSelf = prevIds.includes(profile.id)
+      const isSelf  = assignedToIds.includes(profile.id)
+      if (wasSelf !== isSelf) {
+        if (isSelf) {
+          await supabase.from('task_assignees').insert({ task_id: task.id, user_id: profile.id })
+        } else {
+          await supabase.from('task_assignees').delete().eq('task_id', task.id).eq('user_id', profile.id)
+        }
+      }
     }
 
     if (entries.length > 0) {
@@ -474,7 +486,7 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
                 })}
               </div>
             ) : (
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {task.task_assignees && task.task_assignees.length > 0
                   ? task.task_assignees.map(a => a.profiles ? (
                       <div key={a.user_id} className="flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300">
@@ -482,8 +494,19 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
                         {a.profiles.name}
                       </div>
                     ) : null)
-                  : <span className="text-sm text-gray-400">–</span>
+                  : null
                 }
+                {profile && (() => {
+                  const isSelf = assignedToIds.includes(profile.id)
+                  return (
+                    <button type="button"
+                      onClick={() => setAssignedToIds(prev => isSelf ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                      className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-full border transition-colors
+                        ${isSelf ? 'bg-indigo-50 border-indigo-300 text-indigo-700 dark:bg-indigo-900/30 dark:border-indigo-600 dark:text-indigo-300' : 'border-dashed border-gray-300 dark:border-gray-600 text-gray-400 hover:border-indigo-400 hover:text-indigo-500'}`}>
+                      {isSelf ? '✓ Přiřazen/a' : '+ Přiřadit se'}
+                    </button>
+                  )
+                })()}
               </div>
             )}
           </div>
