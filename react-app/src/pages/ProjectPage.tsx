@@ -1129,13 +1129,26 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
             members={members}
             onChange={ids => onAssigneesChange(task.id, ids)}
           />
-        ) : (
-          <InlineAssigneeSelect
-            assigneeIds={(task.task_assignees ?? []).map(a => a.user_id)}
-            members={members.filter(m => m.id === currentUserId)}
-            onChange={ids => onSelfAssign(task.id, ids.includes(currentUserId))}
-          />
-        )}
+        ) : (() => {
+          const assignees = task.task_assignees ?? []
+          const isSelf = assignees.some(a => a.user_id === currentUserId)
+          return (
+            <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+              {assignees.slice(0, 3).map(a => a.profiles ? (
+                <Avatar key={a.user_id} name={a.profiles.name} initials={a.profiles.initials} color={a.profiles.color} small />
+              ) : null)}
+              {assignees.length > 3 && <span className="text-xs text-gray-400 pl-1">+{assignees.length - 3}</span>}
+              {assignees.length === 0 && <span className="text-xs text-gray-400">–</span>}
+              <button
+                onClick={() => onSelfAssign(task.id, !isSelf)}
+                title={isSelf ? 'Odebrat se' : 'Přiřadit se'}
+                className={`ml-0.5 flex items-center justify-center w-5 h-5 rounded-full border text-[10px] font-bold transition-colors shrink-0 ${isSelf ? 'border-indigo-400 text-indigo-600 bg-indigo-50 dark:bg-indigo-900/30 dark:text-indigo-400' : 'border-dashed border-gray-300 dark:border-gray-600 text-gray-400 hover:border-indigo-400 hover:text-indigo-500'}`}
+              >
+                {isSelf ? '−' : '+'}
+              </button>
+            </div>
+          )
+        })()}
       </td>
       <td className="px-3 py-2.5">
         {canEdit ? (
@@ -1264,7 +1277,7 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDrag
                 {group.tasks.map(task => (
                   <SortableTaskRow key={task.id} task={task}
                     admin={admin}
-                    canEdit={admin || task.assigned_to === profile?.id}
+                    canEdit={admin || task.assigned_to === profile?.id || (task.task_assignees ?? []).some(a => a.user_id === profile?.id)}
                     selected={selectedTaskIds.has(task.id)}
                     anySelected={anySelected}
                     members={members}
