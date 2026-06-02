@@ -1069,15 +1069,17 @@ function CreateTaskModal({ open, onClose, projectId, subprojects, members, defau
 
 // ── Sortable Task Row ─────────────────────────────────────────
 
-function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members, onToggleSelect, onOpen, onDragSelectStart, onDragSelectEnter, onAssigneesChange, onStatusChange, onPriorityChange, onDueDateChange }: {
+function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members, currentUserId, onToggleSelect, onOpen, onDragSelectStart, onDragSelectEnter, onAssigneesChange, onSelfAssign, onStatusChange, onPriorityChange, onDueDateChange }: {
   task: TaskWithRelations; admin: boolean; canEdit: boolean
   selected: boolean; anySelected: boolean
   members: Profile[]
+  currentUserId: string
   onToggleSelect: (id: string, shiftKey?: boolean) => void
   onOpen: () => void
   onDragSelectStart: (id: string) => void
   onDragSelectEnter: (id: string) => void
   onAssigneesChange: (taskId: string, ids: string[]) => void
+  onSelfAssign: (taskId: string, add: boolean) => void
   onStatusChange: (taskId: string, val: TaskStatus) => void
   onPriorityChange: (taskId: string, val: TaskPriority) => void
   onDueDateChange: (taskId: string, val: string | null) => void
@@ -1127,14 +1129,13 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
             members={members}
             onChange={ids => onAssigneesChange(task.id, ids)}
           />
-        ) : (task.task_assignees && task.task_assignees.length > 0 ? (
-          <div className="flex -space-x-1.5 items-center">
-            {task.task_assignees.slice(0, 3).map(a => a.profiles ? (
-              <Avatar key={a.user_id} name={a.profiles.name} initials={a.profiles.initials} color={a.profiles.color} small />
-            ) : null)}
-            {task.task_assignees.length > 3 && <span className="text-xs text-gray-400 pl-2">+{task.task_assignees.length - 3}</span>}
-          </div>
-        ) : <span className="text-xs text-gray-400">–</span>)}
+        ) : (
+          <InlineAssigneeSelect
+            assigneeIds={(task.task_assignees ?? []).map(a => a.user_id)}
+            members={members.filter(m => m.id === currentUserId)}
+            onChange={ids => onSelfAssign(task.id, ids.includes(currentUserId))}
+          />
+        )}
       </td>
       <td className="px-3 py-2.5">
         {canEdit ? (
@@ -1174,7 +1175,7 @@ function SortableTaskRow({ task, admin, canEdit, selected, anySelected, members,
 
 // ── Task Group ────────────────────────────────────────────────
 
-function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDragId, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onDragSelectStart, onDragSelectEnter, onAssigneesChange, onStatusChange, onPriorityChange, onDueDateChange }: {
+function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDragId, onToggleSelect, onToggleGroup, onOpenTask, onCreateTask, onDragSelectStart, onDragSelectEnter, onAssigneesChange, onSelfAssign, onStatusChange, onPriorityChange, onDueDateChange }: {
   group: { id: string | null; name: string; tasks: TaskWithRelations[] }
   admin: boolean; profile: { id: string } | null
   members: Profile[]
@@ -1187,6 +1188,7 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDrag
   onDragSelectStart: (id: string) => void
   onDragSelectEnter: (id: string) => void
   onAssigneesChange: (taskId: string, ids: string[]) => void
+  onSelfAssign: (taskId: string, add: boolean) => void
   onStatusChange: (taskId: string, val: TaskStatus) => void
   onPriorityChange: (taskId: string, val: TaskPriority) => void
   onDueDateChange: (taskId: string, val: string | null) => void
@@ -1266,11 +1268,13 @@ function TaskGroup({ group, admin, profile, members, selectedTaskIds, activeDrag
                     selected={selectedTaskIds.has(task.id)}
                     anySelected={anySelected}
                     members={members}
+                    currentUserId={profile?.id ?? ''}
                     onToggleSelect={onToggleSelect}
                     onOpen={() => onOpenTask(task)}
                     onDragSelectStart={onDragSelectStart}
                     onDragSelectEnter={onDragSelectEnter}
                     onAssigneesChange={onAssigneesChange}
+                    onSelfAssign={onSelfAssign}
                     onStatusChange={onStatusChange}
                     onPriorityChange={onPriorityChange}
                     onDueDateChange={onDueDateChange}
@@ -1845,6 +1849,16 @@ export function ProjectPage() {
     })
   }
 
+  async function handleSelfAssign(taskId: string, add: boolean) {
+    if (!profile) return
+    if (add) {
+      await supabase.from('task_assignees').upsert({ task_id: taskId, user_id: profile.id }, { onConflict: 'task_id,user_id' })
+    } else {
+      await supabase.from('task_assignees').delete().eq('task_id', taskId).eq('user_id', profile.id)
+    }
+    queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+  }
+
   async function handleAssigneesChange(taskId: string, assigneeIds: string[]) {
     if (!profile) return
     const assigned_to = assigneeIds[0] || null
@@ -2090,6 +2104,7 @@ export function ProjectPage() {
             onDragSelectStart={handleDragSelectStart}
             onDragSelectEnter={handleDragSelectEnter}
             onAssigneesChange={handleAssigneesChange}
+            onSelfAssign={handleSelfAssign}
             onStatusChange={handleStatusChange}
             onPriorityChange={handlePriorityChange}
             onDueDateChange={handleDueDateChange}

@@ -1070,8 +1070,7 @@ const VIEW_PRESETS = [
 ] as const
 
 function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initialCameraState }: { url: string; name: string; modelId: string; onClose: () => void; focusAnnotationPos?: THREE.Vector3 | null; initialCameraState?: CameraState | null }) {
-  const { profile, isAdmin } = useAuthStore()
-  const admin = isAdmin()
+  const { profile } = useAuthStore()
   const confirm = useConfirm()
 
   const [wireframe,      setWireframe]      = useState(false)
@@ -1777,8 +1776,7 @@ function formatSize(bytes: number | null) {
 }
 
 export function ModelsPage() {
-  const { profile, isAdmin } = useAuthStore()
-  const admin = isAdmin()
+  const { profile } = useAuthStore()
   const qc = useQueryClient()
   const confirm = useConfirm()
   const [searchParams] = useSearchParams()
