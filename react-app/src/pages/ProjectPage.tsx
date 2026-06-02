@@ -287,6 +287,21 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
   })
 
   const queryClient = useQueryClient()
+
+  async function handleImmediateSelfAssign() {
+    if (!task || !profile) return
+    const isSelf = task.task_assignees?.some(a => a.user_id === profile.id)
+    if (isSelf) {
+      const { error } = await supabase.from('task_assignees').delete().eq('task_id', task.id).eq('user_id', profile.id)
+      if (error) { toast.error('Nepodařilo se odebrat přiřazení: ' + error.message); return }
+    } else {
+      const { error } = await supabase.from('task_assignees').upsert({ task_id: task.id, user_id: profile.id }, { onConflict: 'task_id,user_id' })
+      if (error) { toast.error('Nepodařilo se přiřadit: ' + error.message); return }
+    }
+    queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
+    onSaved()
+  }
+
   const { data: history = [], refetch: refetchHistory } = useQuery({
     queryKey: ['task-history', task?.id],
     queryFn: async () => {
@@ -503,10 +518,10 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
                   : null
                 }
                 {profile && (() => {
-                  const isSelf = assignedToIds.includes(profile.id)
+                  const isSelf = task.task_assignees?.some(a => a.user_id === profile.id)
                   return (
                     <button type="button"
-                      onClick={() => setAssignedToIds(prev => isSelf ? prev.filter(id => id !== profile.id) : [...prev, profile.id])}
+                      onClick={handleImmediateSelfAssign}
                       className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-full border transition-colors
                         ${isSelf ? 'bg-indigo-50 border-indigo-300 text-indigo-700 dark:bg-indigo-900/30 dark:border-indigo-600 dark:text-indigo-300' : 'border-dashed border-gray-300 dark:border-gray-600 text-gray-400 hover:border-indigo-400 hover:text-indigo-500'}`}>
                       {isSelf ? '✓ Přiřazen/a' : '+ Přiřadit se'}
