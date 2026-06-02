@@ -728,7 +728,7 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-400">{attachments.length === 0 ? 'Žádné přílohy.' : `${attachments.length} přílo${attachments.length === 1 ? 'ha' : attachments.length < 5 ? 'hy' : 'h'}`}</span>
-                {canEdit && (
+                {canFullEdit && (
                   <button onClick={() => attachFileRef.current?.click()}
                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors">
                     <Plus size={13} /> Přidat přílohu
@@ -758,7 +758,7 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
                             className="shrink-0 p-1 text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors" title="Stáhnout">
                             <Download size={12} />
                           </a>
-                          {canEdit && (
+                          {canFullEdit && (
                             <button onClick={() => handleDeleteAttachment(att.id, att.file_path)}
                               className="shrink-0 p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors" title="Smazat">
                               <Trash2 size={12} />
