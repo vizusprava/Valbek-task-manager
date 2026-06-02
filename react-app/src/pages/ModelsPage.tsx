@@ -1439,7 +1439,7 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initialCamera
             <AnnotationMarkers
               annotations={annotations}
               onDelete={handleAnnotationDelete}
-              canDelete={admin}
+              canDelete={!!profile}
               visible={annotationsVisible}
               hiddenIds={hiddenAnnotationIds}
             />
@@ -1746,7 +1746,7 @@ function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initialCamera
                           {annHidden ? <EyeOff size={12} /> : <Eye size={12} />}
                         </button>
                         <span className="text-xs text-gray-300 flex-1 wrap-break-word">{ann.text}</span>
-                        {admin && (
+                        {profile && (
                           <button onClick={() => handleAnnotationDelete(ann.id)} className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 shrink-0 transition-all mt-0.5">
                             <X size={11} />
                           </button>
@@ -1928,7 +1928,7 @@ export function ModelsPage() {
             <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">3D Modely</h1>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">Prohlížeč modelů mostů a konstrukcí</p>
           </div>
-          {admin && (
+          {profile && (
             <button
               onClick={() => setUploadOpen(true)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
@@ -1947,7 +1947,7 @@ export function ModelsPage() {
           <div className="text-center py-28 text-gray-400 dark:text-gray-500">
             <Box size={44} className="mx-auto mb-3 opacity-25" />
             <p className="text-sm">Zatím žádné modely</p>
-            {admin && (
+            {profile && (
               <button onClick={() => setUploadOpen(true)} className="mt-3 text-sm text-indigo-500 hover:text-indigo-600">
                 Nahrát první model
               </button>
@@ -1995,19 +1995,15 @@ export function ModelsPage() {
                               className={`p-1.5 rounded-md transition-all opacity-0 group-hover:opacity-100 ${bgModelId === model.id ? 'text-indigo-500 dark:text-indigo-400 opacity-100' : 'text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/20'}`}>
                               <Monitor size={14} />
                             </button>
-                            {admin && (
-                              <button onClick={e => { e.stopPropagation(); setAssigningModelId(assigningModelId === model.id ? null : model.id) }}
-                                title="Přiřadit k projektu"
-                                className={`p-1.5 rounded-md transition-all opacity-0 group-hover:opacity-100 ${model.project_id ? 'text-indigo-500 dark:text-indigo-400 opacity-100' : 'text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/20'}`}>
-                                <FolderOpen size={14} />
-                              </button>
-                            )}
-                            {admin && (
-                              <button onClick={e => { e.stopPropagation(); handleDelete(model) }}
-                                className="p-1.5 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 opacity-0 group-hover:opacity-100 transition-all">
-                                <Trash2 size={14} />
-                              </button>
-                            )}
+                            <button onClick={e => { e.stopPropagation(); setAssigningModelId(assigningModelId === model.id ? null : model.id) }}
+                              title="Přiřadit k projektu"
+                              className={`p-1.5 rounded-md transition-all opacity-0 group-hover:opacity-100 ${model.project_id ? 'text-indigo-500 dark:text-indigo-400 opacity-100' : 'text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/20'}`}>
+                              <FolderOpen size={14} />
+                            </button>
+                            <button onClick={e => { e.stopPropagation(); handleDelete(model) }}
+                              className="p-1.5 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 opacity-0 group-hover:opacity-100 transition-all">
+                              <Trash2 size={14} />
+                            </button>
                           </div>
                         </div>
                         {assigningModelId === model.id && (
