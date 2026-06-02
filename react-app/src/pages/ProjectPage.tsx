@@ -1874,9 +1874,11 @@ export function ProjectPage() {
   async function handleSelfAssign(taskId: string, add: boolean) {
     if (!profile) return
     if (add) {
-      await supabase.from('task_assignees').upsert({ task_id: taskId, user_id: profile.id }, { onConflict: 'task_id,user_id' })
+      const { error } = await supabase.from('task_assignees').upsert({ task_id: taskId, user_id: profile.id }, { onConflict: 'task_id,user_id' })
+      if (error) { toast.error('Nepodařilo se přiřadit: ' + error.message); return }
     } else {
-      await supabase.from('task_assignees').delete().eq('task_id', taskId).eq('user_id', profile.id)
+      const { error } = await supabase.from('task_assignees').delete().eq('task_id', taskId).eq('user_id', profile.id)
+      if (error) { toast.error('Nepodařilo se odebrat přiřazení: ' + error.message); return }
     }
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
   }
