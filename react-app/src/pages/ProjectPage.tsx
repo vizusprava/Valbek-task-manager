@@ -1574,7 +1574,8 @@ export function ProjectPage() {
   const [filterPriority,  setFilterPriority]  = useState('')
   const [filterSubproject,setFilterSubproject]= useState('')
   const [search,          setSearch]          = useState('')
-  const [selectedTask,    setSelectedTask]    = useState<TaskWithRelations | null>(null)
+  const [selectedTaskId,  setSelectedTaskId]  = useState<string | null>(null)
+  const selectedTask = selectedTaskId ? (tasks.find(t => t.id === selectedTaskId) ?? null) : null
   const [showCreate,      setShowCreate]      = useState(false)
   const [createSubId,     setCreateSubId]     = useState('')
   const [showEditProject,       setShowEditProject]       = useState(false)
@@ -2119,7 +2120,7 @@ export function ProjectPage() {
             activeDragId={activeDragId}
             onToggleSelect={toggleTaskSelection}
             onToggleGroup={toggleGroupSelection}
-            onOpenTask={setSelectedTask}
+            onOpenTask={t => setSelectedTaskId(t.id)}
             onCreateTask={subId => { setCreateSubId(subId); setShowCreate(true) }}
             onDragSelectStart={handleDragSelectStart}
             onDragSelectEnter={handleDragSelectEnter}
@@ -2185,7 +2186,7 @@ export function ProjectPage() {
         subprojects={subprojects}
         members={members}
         projectId={projectId!}
-        onClose={() => setSelectedTask(null)}
+        onClose={() => setSelectedTaskId(null)}
         onSaved={() => queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })}
       />
 
