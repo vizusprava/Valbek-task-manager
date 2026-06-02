@@ -151,10 +151,8 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
   const { profile, isAdmin } = useAuthStore()
   const admin      = isAdmin()
   const isCreator  = task?.created_by === profile?.id
-  const isAssigned = task?.assigned_to === profile?.id || task?.task_assignees?.some(a => a.user_id === profile?.id)
-  const canFullEdit     = admin || isCreator
-  const canChangeStatus = admin || isCreator || isAssigned
-  const canDelete       = admin || isCreator
+  const canFullEdit = admin || isCreator
+  const canDelete   = admin || isCreator
   const confirm = useConfirm()
 
   const [title,          setTitle]          = useState('')
@@ -176,6 +174,11 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
   const [activeTab,   setActiveTab]   = useState<'comments' | 'attachments' | 'history'>('comments')
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const isAssigned = task?.assigned_to === profile?.id
+    || task?.task_assignees?.some(a => a.user_id === profile?.id)
+    || (profile ? assignedToIds.includes(profile.id) : false)
+  const canChangeStatus = admin || isCreator || isAssigned
 
   useEffect(() => {
     if (!lightboxSrc) return
@@ -290,13 +293,15 @@ function TaskDetailModal({ task, subprojects, members, projectId, onClose, onSav
 
   async function handleImmediateSelfAssign() {
     if (!task || !profile) return
-    const isSelf = task.task_assignees?.some(a => a.user_id === profile.id)
+    const isSelf = task.task_assignees?.some(a => a.user_id === profile.id) || assignedToIds.includes(profile.id)
     if (isSelf) {
       const { error } = await supabase.from('task_assignees').delete().eq('task_id', task.id).eq('user_id', profile.id)
       if (error) { toast.error('Nepodařilo se odebrat přiřazení: ' + error.message); return }
+      setAssignedToIds(prev => prev.filter(id => id !== profile.id))
     } else {
       const { error } = await supabase.from('task_assignees').upsert({ task_id: task.id, user_id: profile.id }, { onConflict: 'task_id,user_id' })
       if (error) { toast.error('Nepodařilo se přiřadit: ' + error.message); return }
+      setAssignedToIds(prev => [...prev, profile.id])
     }
     queryClient.invalidateQueries({ queryKey: ['tasks', projectId] })
     onSaved()
