@@ -2,7 +2,7 @@ import { useRef, useEffect } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Html, useProgress } from '@react-three/drei'
 import * as THREE from 'three'
-import { CameraState, CameraSaveResult } from './shared'
+import type { CameraState, CameraSaveResult } from './shared'
 
 export function Loader() {
   const { progress } = useProgress()

@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useMemo } from 'react'
-import { useFrame, useThree } from '@react-three/fiber'
+import { useThree } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
 import type { ModelAnnotation } from '@/lib/types'

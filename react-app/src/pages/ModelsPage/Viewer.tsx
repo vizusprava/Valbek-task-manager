@@ -10,12 +10,14 @@ import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { Eye, EyeOff, Layers, PanelRight, MessageSquarePlus, Leaf, Camera, Ruler, Grid3x3, X } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ModelAnnotation, ModelObjectColor } from '@/lib/types'
-import { BUCKET, SceneNode, CameraState, CameraSaveResult, setMeshGlow } from './shared'
+import { BUCKET, setMeshGlow } from './shared'
+import type { SceneNode, CameraState, CameraSaveResult } from './shared'
 import { ModelWithReveal } from './ModelWithReveal'
 import { Loader, CameraNearFarSync, FocusTarget, FlyCamera, CameraPersist, CameraRig, FlyToAnnotation } from './CameraControls'
 import { MeasureTool, ScreenshotCapture } from './ViewerTools'
 import { AnnotationMarkers } from './AnnotationMarkers'
-import { VegetationLayer, VegGroup, VegType, VEG_CFG, scatterOnMesh } from './Vegetation'
+import { VegetationLayer, VEG_CFG, scatterOnMesh } from './Vegetation'
+import type { VegGroup, VegType } from './Vegetation'
 
 const VIEW_PRESETS = [
   { id: 'top',    label: 'Vrch' },

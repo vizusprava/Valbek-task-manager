@@ -2,7 +2,8 @@ import { useRef, useMemo, useEffect } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
-import { SceneNode, setMeshGlow } from './shared'
+import { setMeshGlow } from './shared'
+import type { SceneNode } from './shared'
 
 function collectNodes(obj: THREE.Object3D, depth = 0): SceneNode[] {
   const nodes: SceneNode[] = []
