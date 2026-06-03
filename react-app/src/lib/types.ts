@@ -182,8 +182,8 @@ export interface ReferenceItem {
 }
 
 export interface SpreadsheetColumn { id: string; name: string; width: number }
-export interface SpreadsheetCell { value: string; bgColor?: string; textColor?: string }
-export interface SpreadsheetRow { id: string; cells: Record<string, SpreadsheetCell> }
+export interface SpreadsheetCell { value: string }
+export interface SpreadsheetRow { id: string; name?: string; cells: Record<string, SpreadsheetCell> }
 export interface SpreadsheetData { columns: SpreadsheetColumn[]; rows: SpreadsheetRow[] }
 export interface Spreadsheet {
   id: string
