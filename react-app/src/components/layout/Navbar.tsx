@@ -3,7 +3,7 @@ import logoUrl from '@/assets/logo.png'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
-  Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes, Lightbulb,
+  Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes, Lightbulb, Table2,
   type LucideIcon,
 } from 'lucide-react'
 import { useAuthStore, applyUserBg } from '@/stores/authStore'
@@ -239,6 +239,7 @@ export function Navbar() {
         {admin && !['nela', 'lenka'].includes(profile?.name?.toLowerCase() ?? '') && navItem('/review',  'Ke kontrole', ClipboardCheck, reviewCount)}
         {navItem('/reports',    'Reporty',        BarChart2)}
         {navItem('/inspiration', 'Inspirace',     Lightbulb)}
+        {navItem('/tables',     'Tabulky',        Table2)}
 
       </nav>
 

@@ -181,6 +181,20 @@ export interface ReferenceItem {
   sort_order: number
 }
 
+export interface SpreadsheetColumn { id: string; name: string; width: number }
+export interface SpreadsheetCell { value: string; bgColor?: string; textColor?: string }
+export interface SpreadsheetRow { id: string; cells: Record<string, SpreadsheetCell> }
+export interface SpreadsheetData { columns: SpreadsheetColumn[]; rows: SpreadsheetRow[] }
+export interface Spreadsheet {
+  id: string
+  name: string
+  data: SpreadsheetData
+  created_by: string | null
+  updated_by: string | null
+  created_at: string
+  updated_at: string
+}
+
 // Supabase Database type (pro typed client)
 export type Database = {
   public: {
