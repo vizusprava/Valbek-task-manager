@@ -61,17 +61,34 @@ function EditableLabel({ value, onCommit, className }: {
 
 // ── Sortable column header ────────────────────────────────────
 
-function SortableColHeader({ id, name, onRename, onDelete }: {
-  id: string; name: string
+function SortableColHeader({ id, name, width, onRename, onDelete, onResize }: {
+  id: string; name: string; width: number
   onRename: (id: string, name: string) => void
   onDelete: (id: string) => void
+  onResize: (id: string, width: number) => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
-  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, width: COL_W, minWidth: COL_W }
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, width, minWidth: width }
+
+  function handleResizeMouseDown(e: React.MouseEvent) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = width
+
+    function onMove(ev: MouseEvent) {
+      onResize(id, Math.max(60, startWidth + (ev.clientX - startX)))
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
 
   return (
     <div ref={setNodeRef} style={style}
-      className="group flex items-center gap-1 px-2 py-2 border-r border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 shrink-0">
+      className="group relative flex items-center gap-1 px-2 py-2 border-r border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 shrink-0">
       <span {...attributes} {...listeners}
         className="cursor-grab active:cursor-grabbing text-gray-300 dark:text-gray-600 hover:text-gray-500 shrink-0 touch-none">
         <GripHorizontal size={13} />
@@ -83,6 +100,12 @@ function SortableColHeader({ id, name, onRename, onDelete }: {
       >
         <span className="text-sm leading-none">×</span>
       </button>
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleResizeMouseDown}
+        className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-indigo-400 dark:hover:bg-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+        title="Táhni pro změnu šířky"
+      />
     </div>
   )
 }
@@ -194,6 +217,10 @@ export function SpreadsheetEditor({ spreadsheet, onSaved }: {
     update({ ...data, columns: data.columns.map(c => c.id === colId ? { ...c, name } : c) })
   }
 
+  function resizeColumn(colId: string, width: number) {
+    update({ ...data, columns: data.columns.map(c => c.id === colId ? { ...c, width } : c) })
+  }
+
   function deleteColumn(colId: string) {
     update({
       columns: data.columns.filter(c => c.id !== colId),
@@ -293,7 +320,7 @@ export function SpreadsheetEditor({ spreadsheet, onSaved }: {
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleColDragEnd}>
             <SortableContext items={data.columns.map(c => c.id)} strategy={horizontalListSortingStrategy}>
               {data.columns.map(col => (
-                <SortableColHeader key={col.id} id={col.id} name={col.name} onRename={renameColumn} onDelete={deleteColumn} />
+                <SortableColHeader key={col.id} id={col.id} name={col.name} width={col.width} onRename={renameColumn} onDelete={deleteColumn} onResize={resizeColumn} />
               ))}
             </SortableContext>
           </DndContext>
@@ -330,7 +357,7 @@ export function SpreadsheetEditor({ spreadsheet, onSaved }: {
                     return (
                       <div
                         key={col.id}
-                        style={{ width: COL_W, minWidth: COL_W }}
+                        style={{ width: col.width, minWidth: col.width }}
                         className="relative shrink-0 border-r border-gray-100 dark:border-gray-800"
                       >
                         {isEditing ? (

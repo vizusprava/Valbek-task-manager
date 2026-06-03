@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { PageLayout } from '@/components/layout/PageLayout'
-import { formatDateTime } from '@/lib/utils'
+import { formatDate } from '@/lib/utils'
 import type { Spreadsheet } from '@/lib/types'
 import { SpreadsheetEditor } from './SpreadsheetEditor'
 
@@ -133,7 +133,7 @@ export function TablesPage() {
                   </button>
                 </div>
                 <p className="text-xs text-gray-400 mt-2 pl-7">
-                  {s.data.columns.length} sl. · {s.data.rows.length} ř. · {formatDateTime(s.updated_at)}
+                  Vytvořeno {formatDate(s.created_at)}
                 </p>
               </div>
             ))}
