@@ -26,6 +26,27 @@ import { ManageSubprojectsModal } from './ManageSubprojectsModal'
 import { EditProjectModal } from './EditProjectModal'
 import { BulkCreateTasksModal } from './BulkCreateTasksModal'
 
+function SkeletonTaskGroups() {
+  return (
+    <>
+      {[0, 1, 2].map(i => (
+        <div key={i} className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden mb-4 animate-pulse">
+          <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 dark:border-gray-800">
+            <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-32" />
+            <div className="ml-auto h-3.5 bg-gray-200 dark:bg-gray-700 rounded w-12" />
+          </div>
+          {[0, 1, 2].map(j => (
+            <div key={j} className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-50 dark:border-gray-800/50 last:border-0">
+              <div className="h-3 bg-gray-100 dark:bg-gray-800 rounded w-2/3" />
+              <div className="ml-auto h-3 bg-gray-100 dark:bg-gray-800 rounded w-16" />
+            </div>
+          ))}
+        </div>
+      ))}
+    </>
+  )
+}
+
 export function ProjectPage() {
   const { id: projectId } = useParams<{ id: string }>()
   const navigate      = useNavigate()
@@ -90,7 +111,7 @@ export function ProjectPage() {
     (project?.project_members || []).map(m => m.profiles).filter(Boolean) as Profile[],
     [project])
 
-  const { data: subprojects = [] } = useQuery<Subproject[]>({
+  const { data: subprojects = [], isLoading: subprojectsLoading } = useQuery<Subproject[]>({
     queryKey: ['subprojects', projectId],
     queryFn: async () => {
       const { data } = await supabase.from('subprojects').select('*').eq('project_id', projectId!).order('sort_order')
@@ -99,7 +120,7 @@ export function ProjectPage() {
     enabled: !!projectId,
   })
 
-  const { data: tasks = [] } = useQuery<TaskWithRelations[]>({
+  const { data: tasks = [], isLoading: tasksLoading } = useQuery<TaskWithRelations[]>({
     queryKey: ['tasks', projectId],
     queryFn: async () => {
       const { data } = await supabase.from('tasks')
@@ -574,8 +595,9 @@ export function ProjectPage() {
       </div>
 
       {/* Task groups */}
+      {subprojectsLoading || tasksLoading ? <SkeletonTaskGroups /> : null}
       <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-        {groups.map(group => (
+        {!subprojectsLoading && !tasksLoading && groups.map(group => (
           <TaskGroup key={group.id ?? '__none__'} group={group}
             admin={admin} profile={profile}
             members={members}
