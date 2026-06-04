@@ -255,7 +255,7 @@ export function BackgroundScene() {
 
   return (
     <div
-      className="absolute inset-0 overflow-hidden pointer-events-none"
+      className="fixed inset-0 overflow-hidden pointer-events-none"
       style={{ zIndex: 0, opacity: ready ? 0.2 : 0, transition: 'opacity 1s ease-in-out' }}
     >
       {/* Scanlines overlay */}
