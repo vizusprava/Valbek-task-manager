@@ -1,0 +1,22 @@
+name: Database Backup
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'  # každé pondělí ve 3:00
+  workflow_dispatch:      # nebo spustit ručně kdykoliv
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump databáze
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: pg_dump "$DATABASE_URL" --no-owner --no-acl -Fc -f backup.dump
+
+      - name: Uložit backup jako artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_number }}
+          path: backup.dump
+          retention-days: 90
