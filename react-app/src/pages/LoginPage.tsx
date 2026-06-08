@@ -46,11 +46,11 @@ export function LoginPage() {
     try {
       const { data: email, error: rpcErr } = await supabase
         .rpc('get_email_by_username', { p_username: resetUser.trim().toLowerCase() })
-      if (rpcErr || !email) throw new Error('Uživatel nenalezen.')
-      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/login`,
-      })
-      if (resetErr) throw resetErr
+      if (!rpcErr && email) {
+        await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${window.location.origin}/login`,
+        })
+      }
       setResetOk(true)
     } catch (err) {
       setResetError(err instanceof Error ? err.message : 'Chyba.')
@@ -85,7 +85,7 @@ export function LoginPage() {
                 type="text"
                 autoComplete="username"
                 required
-                placeholder="jmeno"
+                placeholder=""
                 value={username}
                 onChange={e => setUsername(e.target.value)}
                 className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"

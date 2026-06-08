@@ -77,7 +77,10 @@ export function TaskDetailModal({ task, subprojects, members, projectId, onClose
     return () => window.removeEventListener('keydown', handler)
   }, [lightboxSrc])
 
+  const MAX_FILE_SIZE = 25 * 1024 * 1024
+
   async function uploadImage(file: File): Promise<string | null> {
+    if (file.size > MAX_FILE_SIZE) { toast.error('Obrázek je příliš velký (max 25 MB)'); return null }
     const ext = file.name.split('.').pop() || 'png'
     const path = `comment-images/${task?.id}/${Date.now()}.${ext}`
     const { error: upErr } = await supabase.storage.from('attachments').upload(path, file)
@@ -137,6 +140,7 @@ export function TaskDetailModal({ task, subprojects, members, projectId, onClose
     if (!files.length || !task || !profile) return
     e.target.value = ''
     for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) { toast.error(`${file.name} je příliš velký (max 25 MB)`); continue }
       const path = `task-files/${task.id}/${Date.now()}_${file.name}`
       const { error: upErr } = await supabase.storage.from('attachments').upload(path, file)
       if (upErr) { toast.error(`Nepodařilo se nahrát ${file.name}`); continue }

@@ -58,10 +58,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { data: email, error: rpcErr } = await supabase
       .rpc('get_email_by_username', { p_username: username.trim().toLowerCase() })
 
-    if (rpcErr || !email) throw new Error('Uživatel nenalezen.')
+    if (rpcErr || !email) throw new Error('Nesprávné uživatelské jméno nebo heslo.')
 
     const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) throw new Error('Špatné heslo nebo uživatelské jméno.')
+    if (error) throw new Error('Nesprávné uživatelské jméno nebo heslo.')
 
     set({ user: data.user })
     await get().loadProfile(data.user.id)
