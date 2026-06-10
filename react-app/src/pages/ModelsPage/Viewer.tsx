@@ -93,6 +93,8 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
       const { data } = await supabase.from('model_vegetation').select('data').eq('model_id', modelId).order('updated_at', { ascending: false }).limit(1).maybeSingle()
       return (data?.data ?? null) as VegGroup[] | null
     },
+    refetchOnMount: 'always',
+    staleTime: 0,
   })
 
   useEffect(() => {
@@ -124,7 +126,10 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
         { onConflict: 'model_id' }
       )
       if (error) toast.error('Vegetaci se nepodařilo uložit: ' + error.message)
-      else setVegSaved(true)
+      else {
+        queryClient.setQueryData(['model_vegetation', modelId], compact)
+        setVegSaved(true)
+      }
     }, 1500)
     return () => clearTimeout(vegSaveTimer.current)
   }, [vegGroups]) // eslint-disable-line react-hooks/exhaustive-deps
