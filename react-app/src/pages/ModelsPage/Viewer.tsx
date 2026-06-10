@@ -170,7 +170,8 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
     canvas.toBlob(async (blob) => {
       if (!blob || blob.size < 1000) return
       const path = `thumbs/cam_${modelId}.jpg`
-      const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { upsert: true, contentType: 'image/jpeg' })
+      await supabase.storage.from(BUCKET).remove([path])
+      const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg' })
       if (error) return
       await supabase.from('model_files').update({ thumbnail_path: path }).eq('id', modelId)
       localStorage.setItem(`thumb_v_${modelId}`, Date.now().toString())
