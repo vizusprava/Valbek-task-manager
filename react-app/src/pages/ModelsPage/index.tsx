@@ -14,6 +14,20 @@ import type { ModelFile } from '@/lib/types'
 import { BUCKET } from './shared'
 import { Viewer } from './Viewer'
 
+function ModelThumb({ modelId, thumbnailPath }: { modelId: string; thumbnailPath: string }) {
+  const [v, setV] = useState(() => localStorage.getItem(`thumb_v_${modelId}`) ?? '')
+  useEffect(() => {
+    const handler = (e: Event) => {
+      if ((e as CustomEvent<string>).detail === modelId)
+        setV(localStorage.getItem(`thumb_v_${modelId}`) ?? Date.now().toString())
+    }
+    window.addEventListener('thumb-updated', handler)
+    return () => window.removeEventListener('thumb-updated', handler)
+  }, [modelId])
+  const base = supabase.storage.from(BUCKET).getPublicUrl(thumbnailPath).data.publicUrl
+  return <img src={v ? `${base}?v=${v}` : base} alt="" className="w-full h-full object-cover" />
+}
+
 function formatSize(bytes: number | null) {
   if (!bytes) return ''
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
@@ -304,11 +318,9 @@ export function ModelsPage() {
                       className="group bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-lg transition-all"
                     >
                       <div className="h-40 bg-linear-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center overflow-hidden">
-                        {model.thumbnail_path ? (() => {
-                          const base = supabase.storage.from(BUCKET).getPublicUrl(model.thumbnail_path).data.publicUrl
-                          const v = localStorage.getItem(`thumb_v_${model.id}`)
-                          return <img src={v ? `${base}?v=${v}` : base} alt={model.name} className="w-full h-full object-cover" />
-                        })() : (
+                        {model.thumbnail_path ? (
+                          <ModelThumb modelId={model.id} thumbnailPath={model.thumbnail_path} />
+                        ) : (
                           <Box size={48} className="text-gray-300 dark:text-gray-700 group-hover:text-indigo-400 dark:group-hover:text-indigo-500 transition-colors" />
                         )}
                       </div>

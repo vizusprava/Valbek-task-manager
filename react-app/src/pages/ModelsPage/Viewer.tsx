@@ -174,7 +174,9 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
       const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg' })
       if (error) return
       await supabase.from('model_files').update({ thumbnail_path: path }).eq('id', modelId)
-      localStorage.setItem(`thumb_v_${modelId}`, Date.now().toString())
+      const ts = Date.now().toString()
+      localStorage.setItem(`thumb_v_${modelId}`, ts)
+      window.dispatchEvent(new CustomEvent('thumb-updated', { detail: modelId }))
       queryClient.invalidateQueries({ queryKey: ['model_files'] })
     }, 'image/jpeg', 0.88)
   }
