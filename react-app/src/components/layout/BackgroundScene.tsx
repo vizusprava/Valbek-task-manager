@@ -85,9 +85,8 @@ const VEG_CFG: Record<VegType, { baseH: number; color: string; trunkColor?: stri
 
 const HOLO_VEG_COLOR = '#00ffcc'
 
-function GrassLayerHolo({ instances, h }: { instances: VegInstance[]; h: number }) {
-  const ref   = useRef<THREE.InstancedMesh>(null)
-  const matRef = useRef<THREE.ShaderMaterial>(makeHoloMaterial(HOLO_VEG_COLOR))
+function GrassLayerHolo({ instances, h, mat }: { instances: VegInstance[]; h: number; mat: THREE.ShaderMaterial }) {
+  const ref = useRef<THREE.InstancedMesh>(null)
   const geo = useMemo(() => {
     const w = 0.022 * h / 0.12, s60 = 0.866
     const pos = new Float32Array([
@@ -100,7 +99,6 @@ function GrassLayerHolo({ instances, h }: { instances: VegInstance[]; h: number 
     g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(pos.length).fill(0), 3))
     return g
   }, [h])
-  useFrame(({ clock }) => { if (matRef.current) matRef.current.uniforms.uTime.value = clock.getElapsedTime() })
   useEffect(() => {
     if (!ref.current) return
     const d = new THREE.Object3D()
@@ -110,47 +108,92 @@ function GrassLayerHolo({ instances, h }: { instances: VegInstance[]; h: number 
     })
     ref.current.instanceMatrix.needsUpdate = true
   }, [instances])
-  return <instancedMesh ref={ref} args={[geo, matRef.current, instances.length]} />
+  return <instancedMesh ref={ref} args={[geo, mat, instances.length]} />
 }
 
-function BushHolo({ v, h }: { v: VegInstance; h: number }) {
-  const mat = useMemo(() => makeHoloMaterial(HOLO_VEG_COLOR), [])
-  useFrame(({ clock }) => { mat.uniforms.uTime.value = clock.getElapsedTime() })
-  return (
-    <group position={[v.x, v.y, v.z]} rotation={[0, v.ry, 0]} scale={v.s}>
-      <mesh position={[0, h * 0.45, 0]} material={mat}><icosahedronGeometry args={[h * 0.45, 0]} /></mesh>
-    </group>
-  )
+function BushLayerHolo({ instances, h, mat }: { instances: VegInstance[]; h: number; mat: THREE.ShaderMaterial }) {
+  const ref = useRef<THREE.InstancedMesh>(null)
+  const geo = useMemo(() => new THREE.IcosahedronGeometry(h * 0.45, 0), [h])
+
+  useEffect(() => {
+    if (!ref.current) return
+    const grp = new THREE.Object3D()
+    const loc = new THREE.Object3D()
+    loc.position.set(0, h * 0.45, 0); loc.updateMatrix()
+    const m = new THREE.Matrix4()
+    instances.forEach((v, i) => {
+      grp.position.set(v.x, v.y, v.z); grp.rotation.set(0, v.ry, 0); grp.scale.setScalar(v.s); grp.updateMatrix()
+      ref.current!.setMatrixAt(i, m.multiplyMatrices(grp.matrix, loc.matrix))
+    })
+    ref.current.instanceMatrix.needsUpdate = true
+  }, [instances, h])
+
+  return <instancedMesh ref={ref} args={[geo, mat, instances.length]} />
 }
 
-function TreeHolo({ v, h, deciduous }: { v: VegInstance; h: number; deciduous: boolean }) {
-  const matT = useMemo(() => makeHoloMaterial('#00aaff'), [])
-  const matL = useMemo(() => makeHoloMaterial(HOLO_VEG_COLOR), [])
-  useFrame(({ clock }) => { const t = clock.getElapsedTime(); matT.uniforms.uTime.value = t; matL.uniforms.uTime.value = t })
+function TreeLayerHolo({ instances, h, deciduous, matT, matL }: {
+  instances: VegInstance[]; h: number; deciduous: boolean
+  matT: THREE.ShaderMaterial; matL: THREE.ShaderMaterial
+}) {
+  const trunkRef   = useRef<THREE.InstancedMesh>(null)
+  const canopy1Ref = useRef<THREE.InstancedMesh>(null)
+  const canopy2Ref = useRef<THREE.InstancedMesh>(null)
+
+  const trunkGeo   = useMemo(() => new THREE.CylinderGeometry(h * 0.035, h * 0.06, h * 0.4, 5), [h])
+  const canopy1Geo = useMemo(() => deciduous
+    ? new THREE.IcosahedronGeometry(h * 0.38, 0)
+    : new THREE.ConeGeometry(h * 0.38, h * 0.55, 6), [h, deciduous])
+  const canopy2Geo = useMemo(() => deciduous ? null : new THREE.ConeGeometry(h * 0.27, h * 0.42, 6), [h, deciduous])
+
+  useEffect(() => {
+    const grp = new THREE.Object3D()
+    const loc = new THREE.Object3D()
+    const m = new THREE.Matrix4()
+    const fill = (ref: { current: THREE.InstancedMesh | null }, offsetY: number) => {
+      if (!ref.current) return
+      loc.position.set(0, offsetY, 0); loc.updateMatrix()
+      instances.forEach((v, i) => {
+        grp.position.set(v.x, v.y, v.z); grp.rotation.set(0, v.ry, 0); grp.scale.setScalar(v.s); grp.updateMatrix()
+        ref.current!.setMatrixAt(i, m.multiplyMatrices(grp.matrix, loc.matrix))
+      })
+      ref.current.instanceMatrix.needsUpdate = true
+    }
+    fill(trunkRef,   h * 0.2)
+    fill(canopy1Ref, deciduous ? h * 0.68 : h * 0.62)
+    if (!deciduous) fill(canopy2Ref, h * 0.87)
+  }, [instances, h, deciduous])
+
   return (
-    <group position={[v.x, v.y, v.z]} rotation={[0, v.ry, 0]} scale={v.s}>
-      <mesh position={[0, h * 0.2, 0]} material={matT}><cylinderGeometry args={[h * 0.035, h * 0.06, h * 0.4, 5]} /></mesh>
-      {deciduous ? (
-        <mesh position={[0, h * 0.68, 0]} material={matL}><icosahedronGeometry args={[h * 0.38, 0]} /></mesh>
-      ) : (
-        <>
-          <mesh position={[0, h * 0.62, 0]} material={matL}><coneGeometry args={[h * 0.38, h * 0.55, 6]} /></mesh>
-          <mesh position={[0, h * 0.87, 0]} material={matL}><coneGeometry args={[h * 0.27, h * 0.42, 6]} /></mesh>
-        </>
-      )}
-    </group>
+    <>
+      <instancedMesh ref={trunkRef}   args={[trunkGeo,   matT, instances.length]} />
+      {canopy1Geo && <instancedMesh ref={canopy1Ref} args={[canopy1Geo, matL, instances.length]} />}
+      {canopy2Geo && <instancedMesh ref={canopy2Ref} args={[canopy2Geo, matL, instances.length]} />}
+    </>
   )
 }
 
 function VegetationLayerHolo({ groups }: { groups: VegGroup[] }) {
+  const matGrass = useMemo(() => makeHoloMaterial(HOLO_VEG_COLOR), [])
+  const matBush  = useMemo(() => makeHoloMaterial(HOLO_VEG_COLOR), [])
+  const matTrunk = useMemo(() => makeHoloMaterial('#00aaff'), [])
+  const matLeaf  = useMemo(() => makeHoloMaterial(HOLO_VEG_COLOR), [])
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime()
+    matGrass.uniforms.uTime.value = t
+    matBush.uniforms.uTime.value  = t
+    matTrunk.uniforms.uTime.value = t
+    matLeaf.uniforms.uTime.value  = t
+  })
+
   return (
     <>
       {groups.map(g => {
         const cfg = VEG_CFG[g.type]
         const h = cfg.baseH * g.scaleMult
-        if (g.type === 'grass') return <GrassLayerHolo key={g.id} instances={g.instances} h={h} />
-        if (g.type.startsWith('bush')) return <group key={g.id}>{g.instances.map((v, i) => <BushHolo key={i} v={v} h={h} />)}</group>
-        return <group key={g.id}>{g.instances.map((v, i) => <TreeHolo key={i} v={v} h={h} deciduous={g.type.startsWith('tree-d')} />)}</group>
+        if (g.type === 'grass')        return <GrassLayerHolo key={g.id} instances={g.instances} h={h} mat={matGrass} />
+        if (g.type.startsWith('bush')) return <BushLayerHolo  key={g.id} instances={g.instances} h={h} mat={matBush} />
+        return <TreeLayerHolo key={g.id} instances={g.instances} h={h} deciduous={g.type.startsWith('tree-d')} matT={matTrunk} matL={matLeaf} />
       })}
     </>
   )
