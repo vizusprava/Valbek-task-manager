@@ -9,6 +9,7 @@ import { useLocation } from 'react-router-dom'
 import * as THREE from 'three'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
+import { scatterOnMesh, mulberry32 } from '@/pages/ModelsPage/Vegetation'
 
 // ── Error boundary ────────────────────────────────────────────
 class SceneErrorBoundary extends Component<{ children: ReactNode }> {
@@ -68,7 +69,7 @@ function makeHoloMaterial(color = '#00d4ff') {
 // ── Vegetation (mirror of ModelsPage) ────────────────────────
 type VegType = 'grass' | 'bush-s' | 'bush-m' | 'bush-l' | 'tree-s' | 'tree-m' | 'tree-l' | 'tree-ds' | 'tree-dm' | 'tree-dl'
 interface VegInstance { x: number; y: number; z: number; ry: number; s: number; rx?: number; rz?: number }
-interface VegGroup { id: string; type: VegType; targetName: string; scaleMult: number; instances: VegInstance[]; mode: 'scatter' | 'click' }
+interface VegGroup { id: string; type: VegType; targetName: string; scaleMult: number; instances: VegInstance[]; mode: 'scatter' | 'click'; seed?: number; count?: number; patched?: boolean }
 
 const VEG_CFG: Record<VegType, { baseH: number; color: string; trunkColor?: string }> = {
   'grass':   { baseH: 0.12, color: '#6fcf7c' },
@@ -204,17 +205,27 @@ function HoloModel({ url, vegGroups, onReady }: { url: string; vegGroups: VegGro
   const { scene: src } = useGLTF(url)
   const { camera } = useThree()
 
-  const { scene, mats } = useMemo(() => {
+  const { scene, mats, meshMap } = useMemo(() => {
     const s = src.clone(true)
     const created: THREE.ShaderMaterial[] = []
+    const mm = new Map<string, THREE.Mesh>()
     s.traverse(obj => {
       if (!(obj instanceof THREE.Mesh)) return
       const m = makeHoloMaterial('#00d4ff')
       created.push(m)
       obj.material = m
+      mm.set(obj.name, obj)
     })
-    return { scene: s, mats: created }
+    return { scene: s, mats: created, meshMap: mm }
   }, [src])
+
+  const actualVegGroups = useMemo(() => vegGroups.map(g => {
+    if (g.type !== 'grass' || g.seed === undefined || g.instances.length > 0) return g
+    const mesh = meshMap.get(g.targetName)
+    if (!mesh) return g
+    const cap = Math.min(g.count ?? 2000, 5000)
+    return { ...g, instances: scatterOnMesh(mesh, cap, g.patched ?? true, mulberry32(g.seed)) }
+  }), [vegGroups, meshMap])
 
   useFrame(({ clock }) => {
     const t = clock.getElapsedTime()
@@ -242,7 +253,7 @@ function HoloModel({ url, vegGroups, onReady }: { url: string; vegGroups: VegGro
   return (
     <>
       <primitive object={scene} />
-      <VegetationLayerHolo groups={vegGroups} />
+      <VegetationLayerHolo groups={actualVegGroups} />
       <OrbitControls autoRotate autoRotateSpeed={0.4} enableZoom={false} enablePan={false} enableRotate={false} />
     </>
   )

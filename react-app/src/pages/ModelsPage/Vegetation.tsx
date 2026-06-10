@@ -12,6 +12,19 @@ export interface VegGroup {
   scaleMult: number
   instances: VegInstance[]
   mode: 'scatter' | 'click'
+  seed?: number
+  count?: number
+  patched?: boolean
+}
+
+export function mulberry32(seed: number): () => number {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0
+    let t = Math.imul(s ^ (s >>> 15), 1 | s)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
 }
 
 export const VEG_CFG: Record<VegType, { label: string; count: number; baseH: number; color: string; trunkColor?: string }> = {
@@ -27,7 +40,7 @@ export const VEG_CFG: Record<VegType, { label: string; count: number; baseH: num
   'tree-dl': { label: 'Listnatý L', count: 4,    baseH: 8.00, color: '#4a8a1a', trunkColor: '#6d4c41' },
 }
 
-export function scatterOnMesh(mesh: THREE.Mesh, count: number, patched = false): VegInstance[] {
+export function scatterOnMesh(mesh: THREE.Mesh, count: number, patched = false, rng: () => number = Math.random): VegInstance[] {
   mesh.updateWorldMatrix(true, false)
   const bbox = new THREE.Box3().setFromObject(mesh)
   const size = bbox.getSize(new THREE.Vector3())
@@ -40,8 +53,8 @@ export function scatterOnMesh(mesh: THREE.Mesh, count: number, patched = false):
     const nPatches = Math.max(4, Math.round(Math.sqrt(count) * 0.6))
     const patchR   = Math.max(size.x, size.z) * 0.18
     for (let p = 0; p < nPatches * 5 && patchSeeds.length < nPatches; p++) {
-      const cx = THREE.MathUtils.lerp(bbox.min.x, bbox.max.x, Math.random())
-      const cz = THREE.MathUtils.lerp(bbox.min.z, bbox.max.z, Math.random())
+      const cx = THREE.MathUtils.lerp(bbox.min.x, bbox.max.x, rng())
+      const cz = THREE.MathUtils.lerp(bbox.min.z, bbox.max.z, rng())
       ray.set(new THREE.Vector3(cx, bbox.max.y + 1, cz), dn)
       if (ray.intersectObject(mesh, true).length) patchSeeds.push({ x: cx, z: cz })
     }
@@ -50,27 +63,27 @@ export function scatterOnMesh(mesh: THREE.Mesh, count: number, patched = false):
     else {
       const r = patchR
       for (let i = 0; i < count * 20 && out.length < count; i++) {
-        const seed  = patchSeeds[Math.floor(Math.random() * patchSeeds.length)]
-        const angle = Math.random() * Math.PI * 2
-        const dist  = Math.sqrt(Math.random()) * r
-        const x = seed.x + Math.cos(angle) * dist
-        const z = seed.z + Math.sin(angle) * dist
+        const ps   = patchSeeds[Math.floor(rng() * patchSeeds.length)]
+        const angle = rng() * Math.PI * 2
+        const dist  = Math.sqrt(rng()) * r
+        const x = ps.x + Math.cos(angle) * dist
+        const z = ps.z + Math.sin(angle) * dist
         ray.set(new THREE.Vector3(x, bbox.max.y + 1, z), dn)
         const hits = ray.intersectObject(mesh, true)
         if (hits.length)
-          out.push({ x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z, ry: Math.random() * Math.PI * 2, s: 0.75 + Math.random() * 0.5, rx: (Math.random() - 0.5) * 0.28, rz: (Math.random() - 0.5) * 0.28 })
+          out.push({ x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z, ry: rng() * Math.PI * 2, s: 0.75 + rng() * 0.5, rx: (rng() - 0.5) * 0.28, rz: (rng() - 0.5) * 0.28 })
       }
       return out
     }
   }
 
   for (let i = 0; i < count * 10 && out.length < count; i++) {
-    const x = THREE.MathUtils.lerp(bbox.min.x, bbox.max.x, Math.random())
-    const z = THREE.MathUtils.lerp(bbox.min.z, bbox.max.z, Math.random())
+    const x = THREE.MathUtils.lerp(bbox.min.x, bbox.max.x, rng())
+    const z = THREE.MathUtils.lerp(bbox.min.z, bbox.max.z, rng())
     ray.set(new THREE.Vector3(x, bbox.max.y + 1, z), dn)
     const hits = ray.intersectObject(mesh, true)
     if (hits.length)
-      out.push({ x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z, ry: Math.random() * Math.PI * 2, s: 0.75 + Math.random() * 0.5, rx: (Math.random() - 0.5) * 0.28, rz: (Math.random() - 0.5) * 0.28 })
+      out.push({ x: hits[0].point.x, y: hits[0].point.y, z: hits[0].point.z, ry: rng() * Math.PI * 2, s: 0.75 + rng() * 0.5, rx: (rng() - 0.5) * 0.28, rz: (rng() - 0.5) * 0.28 })
   }
   return out
 }

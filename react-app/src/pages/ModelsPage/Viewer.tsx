@@ -16,7 +16,7 @@ import { ModelWithReveal } from './ModelWithReveal'
 import { Loader, CameraNearFarSync, FocusTarget, FlyCamera, CameraPersist, CameraRig, FlyToAnnotation } from './CameraControls'
 import { MeasureTool, ScreenshotCapture } from './ViewerTools'
 import { AnnotationMarkers } from './AnnotationMarkers'
-import { VegetationLayer, VEG_CFG, scatterOnMesh } from './Vegetation'
+import { VegetationLayer, VEG_CFG, scatterOnMesh, mulberry32 } from './Vegetation'
 import type { VegGroup, VegType } from './Vegetation'
 
 const VIEW_PRESETS = [
@@ -60,6 +60,7 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
   const [grassPatched,         setGrassPatched]         = useState(true)
   const [vegPlaceMode,         setVegPlaceMode]         = useState<'scatter' | 'click'>('scatter')
   const [vegSaved,             setVegSaved]             = useState(true)
+  const [meshesLoaded,         setMeshesLoaded]         = useState(false)
   const vegLoadedRef  = useRef(false)
   const vegSkipSave   = useRef(true)
   const vegSaveTimer  = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -112,15 +113,22 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
     clearTimeout(vegSaveTimer.current)
     vegSaveTimer.current = setTimeout(async () => {
       const r = (n: number, d: number) => Math.round(n * d) / d
-      const compact = vegGroups.map(g => ({
-        ...g,
-        instances: g.instances.map(v => ({
-          x: r(v.x, 1000), y: r(v.y, 1000), z: r(v.z, 1000),
-          ry: r(v.ry, 100), s: r(v.s, 100),
-          rx: v.rx !== undefined ? r(v.rx, 100) : undefined,
-          rz: v.rz !== undefined ? r(v.rz, 100) : undefined,
-        })),
-      }))
+      const compact = vegGroups.map(g => {
+        if (g.type === 'grass' && g.seed !== undefined) {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { instances: _i, ...rest } = g
+          return { ...rest, instances: [] }
+        }
+        return {
+          ...g,
+          instances: g.instances.map(v => ({
+            x: r(v.x, 1000), y: r(v.y, 1000), z: r(v.z, 1000),
+            ry: r(v.ry, 100), s: r(v.s, 100),
+            rx: v.rx !== undefined ? r(v.rx, 100) : undefined,
+            rz: v.rz !== undefined ? r(v.rz, 100) : undefined,
+          })),
+        }
+      })
       const { error } = await supabase.from('model_vegetation').upsert(
         { model_id: modelId, data: compact, updated_by: profile.id, updated_at: new Date().toISOString() },
         { onConflict: 'model_id' }
@@ -133,6 +141,20 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
     }, 1500)
     return () => clearTimeout(vegSaveTimer.current)
   }, [vegGroups]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Regenerate seeded grass after model meshes are loaded
+  useEffect(() => {
+    if (!meshesLoaded) return
+    const seeded = vegGroups.filter(g => g.type === 'grass' && g.seed !== undefined && g.instances.length === 0)
+    if (!seeded.length) return
+    vegSkipSave.current = true
+    setVegGroups(prev => prev.map(g => {
+      if (g.type !== 'grass' || g.seed === undefined || g.instances.length > 0) return g
+      const mesh = [...meshMapRef.current.values()].find(m => m.name === g.targetName)
+      if (!mesh) return g
+      return { ...g, instances: scatterOnMesh(mesh, g.count ?? 2000, g.patched ?? true, mulberry32(g.seed!)) }
+    }))
+  }, [meshesLoaded, vegGroups]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { data: annotations = [], refetch: refetchAnnotations } = useQuery({
     queryKey: ['model_annotations', modelId],
@@ -251,16 +273,33 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
   function handleSow() {
     if (!selectedMesh) return
     const count = vegType === 'grass' ? grassCount : VEG_CFG[vegType].count
-    const instances = scatterOnMesh(selectedMesh, count, vegType === 'grass' && grassPatched)
-    if (!instances.length) { toast.error('Nepodařilo se umístit vegetaci'); return }
-    setVegGroups(prev => [...prev, {
-      id: crypto.randomUUID(),
-      type: vegType,
-      targetName: selectedMesh.name,
-      scaleMult: vegScale,
-      instances,
-      mode: 'scatter' as const,
-    }])
+    if (vegType === 'grass') {
+      const seed = Math.floor(Math.random() * 2 ** 32)
+      const instances = scatterOnMesh(selectedMesh, count, grassPatched, mulberry32(seed))
+      if (!instances.length) { toast.error('Nepodařilo se umístit vegetaci'); return }
+      setVegGroups(prev => [...prev, {
+        id: crypto.randomUUID(),
+        type: 'grass',
+        targetName: selectedMesh.name,
+        scaleMult: vegScale,
+        instances,
+        mode: 'scatter' as const,
+        seed,
+        count,
+        patched: grassPatched,
+      }])
+    } else {
+      const instances = scatterOnMesh(selectedMesh, count, false)
+      if (!instances.length) { toast.error('Nepodařilo se umístit vegetaci'); return }
+      setVegGroups(prev => [...prev, {
+        id: crypto.randomUUID(),
+        type: vegType,
+        targetName: selectedMesh.name,
+        scaleMult: vegScale,
+        instances,
+        mode: 'scatter' as const,
+      }])
+    }
   }
 
   function handleVegPlace(pos: THREE.Vector3) {
@@ -391,6 +430,7 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
                 onReady={setNodes}
                 onMeshMap={map => {
                   meshMapRef.current = map
+                  setMeshesLoaded(true)
                   savedColors.forEach(sc => {
                     map.forEach(mesh => { if (mesh.name === sc.object_name) applyColor(mesh, sc.color) })
                   })
@@ -484,7 +524,7 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
                         <p className="text-xs text-gray-500">Hustota</p>
                         <span className="text-xs text-gray-400">{grassCount.toLocaleString()}</span>
                       </div>
-                      <input type="range" min={200} max={50000} step={500} value={grassCount}
+                      <input type="range" min={200} max={200000} step={1000} value={grassCount}
                         onChange={e => setGrassCount(Number(e.target.value))}
                         className="w-full accent-green-500" />
                     </div>
