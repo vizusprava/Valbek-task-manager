@@ -484,7 +484,7 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
                         <p className="text-xs text-gray-500">Hustota</p>
                         <span className="text-xs text-gray-400">{grassCount.toLocaleString()}</span>
                       </div>
-                      <input type="range" min={200} max={10000} step={100} value={grassCount}
+                      <input type="range" min={200} max={50000} step={500} value={grassCount}
                         onChange={e => setGrassCount(Number(e.target.value))}
                         className="w-full accent-green-500" />
                     </div>
