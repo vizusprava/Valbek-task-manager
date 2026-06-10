@@ -90,7 +90,7 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
   const { data: savedVeg } = useQuery({
     queryKey: ['model_vegetation', modelId],
     queryFn: async () => {
-      const { data } = await supabase.from('model_vegetation').select('data').eq('model_id', modelId).maybeSingle()
+      const { data } = await supabase.from('model_vegetation').select('data').eq('model_id', modelId).order('updated_at', { ascending: false }).limit(1).maybeSingle()
       return (data?.data ?? null) as VegGroup[] | null
     },
   })
@@ -163,7 +163,7 @@ export function Viewer({ url, name, modelId, onClose, focusAnnotationPos, initia
       queryClient.invalidateQueries({ queryKey: ['model_files'] })
     })
     canvas.toBlob(async (blob) => {
-      if (!blob) return
+      if (!blob || blob.size < 1000) return
       const path = `thumbs/cam_${modelId}.jpg`
       const { error } = await supabase.storage.from(BUCKET).upload(path, blob, { upsert: true, contentType: 'image/jpeg' })
       if (error) return
