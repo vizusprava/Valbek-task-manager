@@ -48,6 +48,10 @@ DROP POLICY IF EXISTS "model_views_insert" ON model_views;
 CREATE POLICY "model_views_insert" ON model_views
   FOR INSERT TO authenticated WITH CHECK (true);
 
+DROP POLICY IF EXISTS "model_views_update" ON model_views;
+CREATE POLICY "model_views_update" ON model_views
+  FOR UPDATE TO authenticated USING (true);
+
 DROP POLICY IF EXISTS "model_views_delete" ON model_views;
 CREATE POLICY "model_views_delete" ON model_views
   FOR DELETE TO authenticated USING (true);
