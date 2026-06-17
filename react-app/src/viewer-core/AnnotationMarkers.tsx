@@ -217,20 +217,6 @@ export function AnnotationMarkers({ annotations, onDelete, canDelete, visible, h
                             style={{ color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 13, lineHeight: 1 }}
                           >+</button>
                         )}
-                        {onCreateTask && (
-                          <button
-                            onPointerDown={e => e.stopPropagation()}
-                            onClick={e => { e.stopPropagation(); onCreateTask(ann) }}
-                            title="Vytvořit úkol z této poznámky"
-                            style={{ color: '#818cf8', background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
-                              <rect x="9" y="3" width="6" height="4" rx="1" />
-                              <path d="m9 14 2 2 4-4" />
-                            </svg>
-                          </button>
-                        )}
                         <button
                           onPointerDown={e => e.stopPropagation()}
                           onClick={e => { e.stopPropagation(); onDelete(ann.id) }}
@@ -240,6 +226,27 @@ export function AnnotationMarkers({ annotations, onDelete, canDelete, visible, h
                       </div>
                     )}
                   </div>
+                  {onCreateTask && canDelete && (
+                    <button
+                      onPointerDown={e => e.stopPropagation()}
+                      onClick={e => { e.stopPropagation(); onCreateTask(ann) }}
+                      title="Vytvořit úkol z této poznámky"
+                      style={{
+                        width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                        background: hexToRgba(accent, 0.18),
+                        borderTop: `1px solid ${hexToRgba(accent, 0.35)}`,
+                        color: '#dbe1f3', fontSize: 10.5, fontWeight: 600,
+                        padding: '5px 8px', border: 'none', cursor: 'pointer', letterSpacing: '0.02em',
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+                        <rect x="9" y="3" width="6" height="4" rx="1" />
+                        <path d="m9 14 2 2 4-4" />
+                      </svg>
+                      Vytvořit úkol
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
