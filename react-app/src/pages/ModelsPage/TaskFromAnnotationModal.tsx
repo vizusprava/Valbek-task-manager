@@ -109,7 +109,7 @@ export function TaskFromAnnotationModal({ open, onClose, annotation, model, proj
   if (!annotation) return null
 
   return (
-    <Modal open={open} onClose={onClose} title="Nový úkol z anotace" size="md">
+    <Modal open={open} onClose={onClose} title="Nový úkol z anotace" size="md" zClass="z-[10000]">
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="flex items-start gap-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-900/20 p-3">
           <MapPin size={14} className="text-indigo-500 shrink-0 mt-0.5" />
