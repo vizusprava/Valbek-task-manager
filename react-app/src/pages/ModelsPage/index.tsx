@@ -11,8 +11,11 @@ import { setBgModel } from '@/components/layout/BackgroundScene'
 import { Upload, X, Box, Trash2, FolderOpen, Monitor, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ModelFile } from '@/lib/types'
+import { Viewer } from '@/viewer-core'
+import type { ViewerAnnotation } from '@/viewer-core'
 import { BUCKET } from './shared'
-import { Viewer } from './Viewer'
+import { makeSupabaseViewerAdapter } from './viewerAdapter'
+import { TaskFromAnnotationModal } from './TaskFromAnnotationModal'
 
 function ModelThumb({ modelId, thumbnailPath }: { modelId: string; thumbnailPath: string }) {
   const [v, setV] = useState(() => localStorage.getItem(`thumb_v_${modelId}`) ?? '')
@@ -92,9 +95,11 @@ export function ModelsPage() {
   const qc = useQueryClient()
   const confirm = useConfirm()
   const [searchParams] = useSearchParams()
+  const viewerAdapter = useMemo(() => makeSupabaseViewerAdapter(qc), [qc])
 
   const [viewerModel, setViewerModel] = useState<{ model: ModelFile; url: string } | null>(null)
   const [focusAnnotationPos, setFocusAnnotationPos] = useState<THREE.Vector3 | null>(null)
+  const [taskFromAnnotation, setTaskFromAnnotation] = useState<ViewerAnnotation | null>(null)
   const [bgModelId, setBgModelId]         = useState(() => localStorage.getItem('bg_model_id') ?? '')
   const [uploadOpen, setUploadOpen]       = useState(false)
   const [uploading, setUploading]         = useState(false)
@@ -442,9 +447,24 @@ export function ModelsPage() {
           url={viewerModel.url}
           name={viewerModel.model.name}
           modelId={viewerModel.model.id}
+          adapter={viewerAdapter}
+          canEdit={!!profile}
+          confirm={confirm}
           onClose={() => { setViewerModel(null); setFocusAnnotationPos(null) }}
           focusAnnotationPos={focusAnnotationPos}
           initialCameraState={viewerModel.model.camera_state ?? null}
+          onCreateTask={profile ? setTaskFromAnnotation : undefined}
+        />
+      )}
+
+      {viewerModel && (
+        <TaskFromAnnotationModal
+          open={!!taskFromAnnotation}
+          onClose={() => setTaskFromAnnotation(null)}
+          annotation={taskFromAnnotation}
+          model={viewerModel.model}
+          projects={projects}
+          onCreated={() => qc.invalidateQueries({ queryKey: ['tasks'] })}
         />
       )}
     </PageLayout>

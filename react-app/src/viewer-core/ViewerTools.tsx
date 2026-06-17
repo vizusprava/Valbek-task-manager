@@ -1,18 +1,94 @@
-import { useRef, useEffect, useState, useMemo } from 'react'
+/* eslint-disable react-hooks/refs, react-hooks/set-state-in-effect -- imperativní raycast nástroj: ref drží aktuální stav pro DOM event handler, mutace probíhá záměrně */
+import { useRef, useEffect, useState } from 'react'
 import { useThree } from '@react-three/fiber'
-import { Html } from '@react-three/drei'
+import { Html, Line } from '@react-three/drei'
 import * as THREE from 'three'
-import type { ModelAnnotation } from '@/lib/types'
+import type { ViewerAnnotation } from './adapter'
 
-export function MeasureTool({ active }: { active: boolean }) {
+// vždy navrchu: vysoký renderOrder + materiál bez depth testu/zápisu (přes celý model)
+const MEASURE_ORDER = 100000
+const MEASURE_COLOR = '#f97316'
+// společné props pro vždy-viditelné pixelové čáry (drei spreaduje i na materiál)
+const LINE_OVERLAY = { color: MEASURE_COLOR, transparent: true, depthTest: false, depthWrite: false, renderOrder: MEASURE_ORDER } as const
+
+/** Puntík v konstantní pixelové velikosti (jako tečka u anotace), vždy navrchu. */
+function MeasureDot({ p }: { p: THREE.Vector3 }) {
+  return (
+    <Html position={[p.x, p.y, p.z]} center style={{ pointerEvents: 'none' }}>
+      <div style={{ width: 7, height: 7, borderRadius: '50%', background: MEASURE_COLOR, boxShadow: '0 0 6px rgba(249,115,22,0.9)' }} />
+    </Html>
+  )
+}
+
+const fmtDist = (d: number) => (d < 1 ? `${(d * 100).toFixed(1)} cm` : `${d.toFixed(3)} m`)
+
+/** Spočítá směr odsazení kóty (kolmo na čáru); u svislé čáry vodorovně ke kameře. */
+function measureOffset(a: THREE.Vector3, b: THREE.Vector3, camPos: THREE.Vector3): THREE.Vector3 {
+  const dir = b.clone().sub(a).normalize()
+  const up = new THREE.Vector3(0, 1, 0)
+  const off = up.clone().addScaledVector(dir, -dir.dot(up))
+  if (off.lengthSq() < 0.02) {
+    const m = a.clone().lerp(b, 0.5)
+    off.copy(camPos).sub(m); off.y = 0
+    off.addScaledVector(dir, -dir.dot(off))
+    if (off.lengthSq() < 1e-6) off.set(1, 0, 0)
+  }
+  return off.normalize()
+}
+
+/** Jedno měření = dva body + odsazená kóta tenkými čárami. Směr odsazení je předaný (fixní). */
+function OneMeasure({ a, b, off }: { a: THREE.Vector3; b: THREE.Vector3; off: THREE.Vector3 }) {
+  const dist = a.distanceTo(b)
+  const lift = Math.min(0.5, Math.max(dist * 0.15, 0.12))
+  const d = off.clone().multiplyScalar(lift)
+  const r0 = a.clone().add(d)
+  const r1 = b.clone().add(d)
+  const mid = r0.clone().lerp(r1, 0.5)
+  return (
+    <>
+      <MeasureDot p={a} />
+      <MeasureDot p={b} />
+      <Line points={[a, r0]} lineWidth={1.5} {...LINE_OVERLAY} />
+      <Line points={[b, r1]} lineWidth={1.5} {...LINE_OVERLAY} />
+      <Line points={[r0, r1]} lineWidth={2.5} {...LINE_OVERLAY} />
+      <Html position={mid} center>
+        <div className="bg-gray-900/90 text-orange-400 text-xs font-mono font-semibold px-2 py-1 rounded border border-orange-500/40 whitespace-nowrap pointer-events-none select-none shadow-lg">
+          {fmtDist(dist)}
+        </div>
+      </Html>
+    </>
+  )
+}
+
+export type MeasureApi = { reset: () => void; undo: () => void }
+
+export function MeasureTool({ active, apiRef, onCount }: {
+  active: boolean
+  apiRef?: { current: MeasureApi | null }
+  onCount?: (n: number) => void
+}) {
   const { camera, gl, scene } = useThree()
-  const [pts, setPts] = useState<THREE.Vector3[]>([])
-  const ptsRef  = useRef<THREE.Vector3[]>([])
-  const downXY  = useRef({ x: 0, y: 0 })
+  const [measurements, setMeasurements] = useState<{ a: THREE.Vector3; b: THREE.Vector3; off: THREE.Vector3 }[]>([])
+  const [pending, setPending] = useState<THREE.Vector3 | null>(null)
+  const pendRef = useRef<THREE.Vector3 | null>(null)
+  pendRef.current = pending
+  const downXY = useRef({ x: 0, y: 0 })
 
+  useEffect(() => { if (!active) setPending(null) }, [active])
+  useEffect(() => { onCount?.(measurements.length) }, [measurements, onCount])
+
+  // imperativní reset/undo pro DOM ovládání ve Vieweru
   useEffect(() => {
-    if (!active) { ptsRef.current = []; setPts([]) }
-  }, [active])
+    if (!apiRef) return
+    apiRef.current = {
+      reset: () => { setMeasurements([]); setPending(null) },
+      undo: () => {
+        if (pendRef.current) setPending(null)
+        else setMeasurements(m => m.slice(0, -1))
+      },
+    }
+    return () => { apiRef.current = null }
+  }, [apiRef])
 
   useEffect(() => {
     if (!active) return
@@ -37,10 +113,14 @@ export function MeasureTool({ active }: { active: boolean }) {
       scene.traverse(o => { if ((o as THREE.Mesh).isMesh) meshes.push(o) })
       const hits = rc.intersectObjects(meshes, false)
       if (hits.length === 0) return
-      const current = ptsRef.current
-      const next = current.length >= 2 ? [hits[0].point.clone()] : [...current, hits[0].point.clone()]
-      ptsRef.current = next
-      setPts([...next])
+      const p = hits[0].point.clone()
+      if (pendRef.current === null) setPending(p)
+      else {
+        const a = pendRef.current
+        const off = measureOffset(a, p, camera.position) // směr odsazení spočítán jednou, pak fixní
+        setMeasurements(m => [...m, { a, b: p, off }])
+        setPending(null)
+      }
     }
 
     canvas.addEventListener('pointerdown', onPointerDown)
@@ -51,47 +131,19 @@ export function MeasureTool({ active }: { active: boolean }) {
     }
   }, [active, camera, gl, scene])
 
-  const dist = pts.length === 2 ? pts[0].distanceTo(pts[1]) : null
-  const mid  = dist !== null ? pts[0].clone().lerp(pts[1], 0.5) : null
-
-  const cylinderQuat = useMemo(() => {
-    if (pts.length < 2) return new THREE.Quaternion()
-    const dir = pts[1].clone().sub(pts[0]).normalize()
-    return new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
-  }, [pts])
-
-  const radius = dist !== null ? Math.max(dist * 0.006, 0.004) : 0.01
-
-  if (!active || pts.length === 0) return null
+  if (measurements.length === 0 && !pending) return null
 
   return (
     <group>
-      {pts.map((p, i) => (
-        <mesh key={i} position={p} renderOrder={999}>
-          <sphereGeometry args={[radius * 1.6, 16, 16]} />
-          <meshBasicMaterial color="#f97316" depthTest={false} />
-        </mesh>
-      ))}
-      {dist !== null && mid && (
-        <mesh position={mid} quaternion={cylinderQuat} renderOrder={999}>
-          <cylinderGeometry args={[radius, radius, dist, 6]} />
-          <meshBasicMaterial color="#f97316" depthTest={false} />
-        </mesh>
-      )}
-      {mid && dist !== null && (
-        <Html position={mid} center>
-          <div className="bg-gray-900/90 text-orange-400 text-xs font-mono font-semibold px-2 py-1 rounded border border-orange-500/40 whitespace-nowrap pointer-events-none select-none shadow-lg">
-            {dist < 1 ? `${(dist * 100).toFixed(1)} cm` : `${dist.toFixed(3)} m`}
-          </div>
-        </Html>
-      )}
+      {measurements.map((m, i) => <OneMeasure key={i} a={m.a} b={m.b} off={m.off} />)}
+      {pending && <MeasureDot p={pending} />}
     </group>
   )
 }
 
 export function ScreenshotCapture({ takeFnRef, annotations, annotationsVisible, hiddenAnnotationIds }: {
   takeFnRef: { current: (() => void) | null }
-  annotations: ModelAnnotation[]
+  annotations: ViewerAnnotation[]
   annotationsVisible: boolean
   hiddenAnnotationIds: Set<string>
 }) {

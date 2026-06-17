@@ -25,16 +25,19 @@ interface ModelProps {
   selectedUuid: string | null
   annotationMode: boolean
   vegClickPlace: boolean
+  addPinMode: boolean
   boundsRef: { current: THREE.Box3 | null }
   onReady: (nodes: SceneNode[]) => void
   onMeshMap: (map: Map<string, THREE.Mesh>) => void
+  onSceneReady?: (root: THREE.Object3D) => void
   onHover: (uuid: string | null) => void
   onSelect: (mesh: THREE.Mesh) => void
   onAnnotationPlace: (pos: THREE.Vector3, objectName: string) => void
   onVegPlace: (pos: THREE.Vector3) => void
+  onAddPin: (pos: THREE.Vector3) => void
 }
 
-export function ModelWithReveal({ url, wireframe, wireframeOnly, wireframeColor, wireframeMode, selectedUuid, annotationMode, vegClickPlace, boundsRef, onReady, onMeshMap, onHover, onSelect, onAnnotationPlace, onVegPlace }: ModelProps) {
+export function ModelWithReveal({ url, wireframe, wireframeOnly, wireframeColor, wireframeMode, selectedUuid, annotationMode, vegClickPlace, addPinMode, boundsRef, onReady, onMeshMap, onSceneReady, onHover, onSelect, onAnnotationPlace, onVegPlace, onAddPin }: ModelProps) {
   const { scene } = useGLTF(url)
   const { camera, controls, gl } = useThree()
   const bounds           = useMemo(() => new THREE.Box3().setFromObject(scene), [scene])
@@ -109,6 +112,8 @@ export function ModelWithReveal({ url, wireframe, wireframeOnly, wireframeColor,
     const meshMap = new Map<string, THREE.Mesh>()
     scene.traverse(child => {
       if (!(child instanceof THREE.Mesh)) return
+      child.castShadow = true
+      child.receiveShadow = true
       meshMap.set(child.uuid, child)
       const mats = Array.isArray(child.material) ? child.material : [child.material]
       mats.forEach(m => { if (m) { m.transparent = true; m.opacity = 0; m.side = THREE.DoubleSide } })
@@ -132,6 +137,7 @@ export function ModelWithReveal({ url, wireframe, wireframeOnly, wireframeColor,
     meshMapRef.current = meshMap
     onMeshMap(meshMap)
     onReady(collectNodes(scene))
+    onSceneReady?.(scene)
 
     return () => {
       scene.traverse(child => {
@@ -208,6 +214,7 @@ export function ModelWithReveal({ url, wireframe, wireframeOnly, wireframeColor,
       }}
       onClick={(e: { object: THREE.Object3D; stopPropagation: () => void; point: THREE.Vector3 }) => {
         e.stopPropagation()
+        if (addPinMode) { onAddPin(e.point.clone()); return }
         if (annotationMode) { onAnnotationPlace(e.point.clone(), e.object.name || ''); return }
         if (vegClickPlace) { onVegPlace(e.point.clone()); return }
         const mesh = e.object as THREE.Mesh

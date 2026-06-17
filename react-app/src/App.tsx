@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, lazy, Suspense } from 'react'
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'sonner'
@@ -6,15 +6,18 @@ import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
-import { ProjectPage } from '@/pages/ProjectPage'
-import { MyTasksPage } from '@/pages/MyTasksPage'
-import { ReviewPage } from '@/pages/ReviewPage'
-import { ReportsPage } from '@/pages/ReportsPage'
-import { ThreeDMaxPage } from '@/pages/ThreeDMaxPage'
-import { ModelsPage } from '@/pages/ModelsPage'
-import { InspiracePage } from '@/pages/InspiracePage'
-import { TablesPage } from '@/pages/TablesPage'
 import { ConfirmDialogProvider } from '@/components/ui/ConfirmDialog'
+
+// Login + Dashboard jsou eager (úvodní paint). Zbytek lazy — hlavně 3D stránky
+// (ModelsPage tahá three/drei/postprocessing) se tak nenačtou, dokud na ně uživatel nejde.
+const ProjectPage   = lazy(() => import('@/pages/ProjectPage').then(m => ({ default: m.ProjectPage })))
+const MyTasksPage   = lazy(() => import('@/pages/MyTasksPage').then(m => ({ default: m.MyTasksPage })))
+const ReviewPage    = lazy(() => import('@/pages/ReviewPage').then(m => ({ default: m.ReviewPage })))
+const ReportsPage   = lazy(() => import('@/pages/ReportsPage').then(m => ({ default: m.ReportsPage })))
+const ThreeDMaxPage = lazy(() => import('@/pages/ThreeDMaxPage').then(m => ({ default: m.ThreeDMaxPage })))
+const ModelsPage    = lazy(() => import('@/pages/ModelsPage').then(m => ({ default: m.ModelsPage })))
+const InspiracePage = lazy(() => import('@/pages/InspiracePage').then(m => ({ default: m.InspiracePage })))
+const TablesPage    = lazy(() => import('@/pages/TablesPage').then(m => ({ default: m.TablesPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,6 +27,14 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+function PageSpinner() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950">
+      <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+    </div>
+  )
+}
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuthStore()
@@ -71,6 +82,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <ConfirmDialogProvider>
       <HashRouter>
+        <Suspense fallback={<PageSpinner />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<AuthGuard><DashboardPage /></AuthGuard>} />
@@ -85,6 +97,7 @@ export default function App() {
           <Route path="/tables" element={<AuthGuard><TablesPage /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
+        </Suspense>
       </HashRouter>
       <Toaster position="bottom-right" richColors />
       </ConfirmDialogProvider>

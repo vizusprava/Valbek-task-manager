@@ -9,7 +9,7 @@ import { useLocation } from 'react-router-dom'
 import * as THREE from 'three'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
-import { scatterOnMesh, mulberry32 } from '@/pages/ModelsPage/Vegetation'
+import { scatterOnMesh, mulberry32 } from '@/viewer-core/Vegetation'
 
 // ── Error boundary ────────────────────────────────────────────
 class SceneErrorBoundary extends Component<{ children: ReactNode }> {

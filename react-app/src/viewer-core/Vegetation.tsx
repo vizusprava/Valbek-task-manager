@@ -115,14 +115,14 @@ function GrassLayer({ instances, color, h }: { instances: VegInstance[]; color: 
     })
     ref.current.instanceMatrix.needsUpdate = true
   }, [instances])
-  return <instancedMesh ref={ref} args={[geo, mat, instances.length]} />
+  return <instancedMesh ref={ref} args={[geo, mat, instances.length]} receiveShadow />
 }
 
 function BushInst({ v, color, h }: { v: VegInstance; color: string; h: number }) {
   const r = h * 0.45
   return (
     <group position={[v.x, v.y, v.z]} rotation={[0, v.ry, 0]} scale={v.s}>
-      <mesh position={[0, r * 0.9, 0]}>
+      <mesh position={[0, r * 0.9, 0]} castShadow>
         <icosahedronGeometry args={[r, 0]} />
         <meshStandardMaterial color={color} flatShading />
       </mesh>
@@ -133,15 +133,15 @@ function BushInst({ v, color, h }: { v: VegInstance; color: string; h: number })
 function TreeInst({ v, color, trunkColor, h }: { v: VegInstance; color: string; trunkColor: string; h: number }) {
   return (
     <group position={[v.x, v.y, v.z]} rotation={[0, v.ry, 0]} scale={v.s}>
-      <mesh position={[0, h * 0.18, 0]}>
+      <mesh position={[0, h * 0.18, 0]} castShadow>
         <cylinderGeometry args={[h * 0.035, h * 0.06, h * 0.36, 5]} />
         <meshStandardMaterial color={trunkColor} flatShading />
       </mesh>
-      <mesh position={[0, h * 0.62, 0]}>
+      <mesh position={[0, h * 0.62, 0]} castShadow>
         <coneGeometry args={[h * 0.38, h * 0.55, 6]} />
         <meshStandardMaterial color={color} flatShading />
       </mesh>
-      <mesh position={[0, h * 0.87, 0]}>
+      <mesh position={[0, h * 0.87, 0]} castShadow>
         <coneGeometry args={[h * 0.27, h * 0.42, 6]} />
         <meshStandardMaterial color={color} flatShading />
       </mesh>
@@ -153,19 +153,19 @@ function TreeDecidInst({ v, color, trunkColor, h }: { v: VegInstance; color: str
   const r = h * 0.38
   return (
     <group position={[v.x, v.y, v.z]} rotation={[0, v.ry, 0]} scale={v.s}>
-      <mesh position={[0, h * 0.22, 0]}>
+      <mesh position={[0, h * 0.22, 0]} castShadow>
         <cylinderGeometry args={[h * 0.028, h * 0.048, h * 0.44, 5]} />
         <meshStandardMaterial color={trunkColor} flatShading />
       </mesh>
-      <mesh position={[0, h * 0.68, 0]}>
+      <mesh position={[0, h * 0.68, 0]} castShadow>
         <icosahedronGeometry args={[r, 0]} />
         <meshStandardMaterial color={color} flatShading />
       </mesh>
-      <mesh position={[h * 0.12, h * 0.88, 0]}>
+      <mesh position={[h * 0.12, h * 0.88, 0]} castShadow>
         <icosahedronGeometry args={[r * 0.55, 0]} />
         <meshStandardMaterial color={color} flatShading />
       </mesh>
-      <mesh position={[-h * 0.10, h * 0.84, h * 0.08]}>
+      <mesh position={[-h * 0.10, h * 0.84, h * 0.08]} castShadow>
         <icosahedronGeometry args={[r * 0.48, 0]} />
         <meshStandardMaterial color={color} flatShading />
       </mesh>

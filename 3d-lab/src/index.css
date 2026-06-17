@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* jádro vieweru leží mimo root labu — Tailwind ho musí skenovat explicitně */
+@source "../../react-app/src/viewer-core";
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #030712;
+  color: #e5e7eb;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
