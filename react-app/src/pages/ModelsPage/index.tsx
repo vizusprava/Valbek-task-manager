@@ -155,12 +155,18 @@ export function ModelsPage() {
     return groups
   }, [models, projects])
 
+  // auto-otevření z odkazu (?model=&annotation=) jen JEDNOU — jinak by invalidace
+  // model_files (např. uložení kamery při zavření) viewer hned zase otevřela
+  const didDeepLink = useRef(false)
   useEffect(() => {
+    if (didDeepLink.current) return
     const modelParam      = searchParams.get('model')
     const annotationParam = searchParams.get('annotation')
     if (!modelParam || models.length === 0) return
     const found = models.find(m => m.id === modelParam)
-    if (found && !viewerModel) openViewer(found)
+    if (!found) return
+    didDeepLink.current = true
+    openViewer(found)
     if (annotationParam) {
       supabase.from('model_annotations').select('x, y, z').eq('id', annotationParam).maybeSingle()
         .then(({ data }) => {
