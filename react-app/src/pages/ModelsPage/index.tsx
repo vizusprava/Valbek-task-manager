@@ -162,7 +162,7 @@ export function ModelsPage() {
     const found = models.find(m => m.id === modelParam)
     if (found && !viewerModel) openViewer(found)
     if (annotationParam) {
-      supabase.from('model_annotations').select('x, y, z').eq('id', annotationParam).single()
+      supabase.from('model_annotations').select('x, y, z').eq('id', annotationParam).maybeSingle()
         .then(({ data }) => {
           if (data) setFocusAnnotationPos(new THREE.Vector3(data.x, data.y, data.z))
         })
