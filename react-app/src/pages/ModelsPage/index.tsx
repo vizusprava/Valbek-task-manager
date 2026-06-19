@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { supabase } from '@/lib/supabase'
+import { signedUrl, useSignedUrl } from '@/lib/storage'
 import { useAuthStore } from '@/stores/authStore'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { PageLayout } from '@/components/layout/PageLayout'
@@ -27,8 +28,9 @@ function ModelThumb({ modelId, thumbnailPath }: { modelId: string; thumbnailPath
     window.addEventListener('thumb-updated', handler)
     return () => window.removeEventListener('thumb-updated', handler)
   }, [modelId])
-  const base = supabase.storage.from(BUCKET).getPublicUrl(thumbnailPath).data.publicUrl
-  return <img src={v ? `${base}?v=${v}` : base} alt="" className="w-full h-full object-cover" />
+  const signed = useSignedUrl(BUCKET, thumbnailPath, v)
+  if (!signed) return null
+  return <img src={v ? `${signed}&v=${v}` : signed} alt="" className="w-full h-full object-cover" />
 }
 
 function formatSize(bytes: number | null) {
@@ -129,9 +131,10 @@ export function ModelsPage() {
     },
   })
 
-  function openViewer(model: ModelFile) {
-    const { data } = supabase.storage.from(BUCKET).getPublicUrl(model.file_path)
-    setViewerModel({ model, url: data.publicUrl })
+  async function openViewer(model: ModelFile) {
+    const url = await signedUrl(BUCKET, model.file_path)
+    if (!url) { toast.error('Nepodařilo se načíst model.'); return }
+    setViewerModel({ model, url })
   }
 
   async function handleAssignProject(modelId: string, projectId: string | null) {

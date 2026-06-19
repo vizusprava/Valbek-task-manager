@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Plus, Copy, Send, Trash2, Paperclip, CheckCircle, MapPin, ExternalLink, FileText, Download } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { useSignedUrl } from '@/lib/storage'
 import { useAuthStore } from '@/stores/authStore'
 import { Avatar } from '@/components/ui/Avatar'
 import { StatusBadge, PriorityBadge } from '@/components/ui/Badge'
@@ -15,14 +16,61 @@ import { formatDate, formatDateTime, isOverdue, STATUS_LABELS, PRIORITY_LABELS, 
 import type { TaskWithRelations, Subproject, Profile, Comment, TaskAttachment, TaskStatus, TaskPriority } from '@/lib/types'
 import { inputClass, formatFileSize, isImageUrl } from './shared'
 
+/** Obrázek z privátního bucketu `attachments` — podepíše cestu/URL za běhu (i staré public URL). */
+function AttImg({ value, className, onClick }: { value: string; className?: string; onClick?: (src: string) => void }) {
+  const src = useSignedUrl('attachments', value)
+  if (!src) return <div className={className} style={{ background: 'rgba(0,0,0,0.06)' }} />
+  return <img src={src} alt="" className={className} onClick={onClick ? () => onClick(src) : undefined} />
+}
+
+function AttachmentCard({ att, canEdit, onLightbox, onDelete }: {
+  att: TaskAttachment; canEdit: boolean
+  onLightbox: (src: string) => void
+  onDelete: (id: string, path: string) => void
+}) {
+  const url = useSignedUrl('attachments', att.file_path)
+  const isImg = /\.(jpe?g|png|gif|webp|svg)$/i.test(att.name) || att.mime_type?.startsWith('image/')
+  return (
+    <div className="group relative rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden bg-gray-50 dark:bg-gray-800 flex flex-col">
+      {isImg && url ? (
+        <div className="h-24 bg-gray-100 dark:bg-gray-700 overflow-hidden cursor-zoom-in" onClick={() => onLightbox(url)}>
+          <img src={url} alt={att.name} className="w-full h-full object-cover" />
+        </div>
+      ) : (
+        <div className="h-24 flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+          <FileText size={32} className="text-gray-300 dark:text-gray-600" />
+        </div>
+      )}
+      <div className="px-2 py-1.5 flex items-center gap-1.5 min-w-0">
+        <span className="text-xs text-gray-700 dark:text-gray-300 truncate flex-1" title={att.name}>{att.name}</span>
+        {url && (
+          <a href={url} download={att.name} target="_blank" rel="noreferrer"
+            className="shrink-0 p-1 text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors" title="Stáhnout">
+            <Download size={12} />
+          </a>
+        )}
+        {canEdit && (
+          <button onClick={() => onDelete(att.id, att.file_path)}
+            className="shrink-0 p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors" title="Smazat">
+            <Trash2 size={12} />
+          </button>
+        )}
+      </div>
+      {att.file_size && (
+        <span className="absolute top-1.5 right-1.5 text-[10px] bg-black/50 text-white rounded px-1 py-0.5 leading-none">{formatFileSize(att.file_size)}</span>
+      )}
+    </div>
+  )
+}
+
 function CommentText({ text, onImageClick }: { text: string; onImageClick?: (src: string) => void }) {
   return (
     <>
       {text.split('\n').map((line, i, arr) =>
         isImageUrl(line.trim())
-          ? <img key={i} src={line.trim()} alt=""
+          ? <AttImg key={i} value={line.trim()}
               className="max-w-full max-h-64 rounded-lg mt-1 block cursor-zoom-in"
-              onClick={() => onImageClick?.(line.trim())}
+              onClick={onImageClick}
             />
           : <span key={i}>{line}{i < arr.length - 1 && <br />}</span>
       )}
@@ -85,7 +133,7 @@ export function TaskDetailModal({ task, subprojects, members, projectId, onClose
     const path = `comment-images/${task?.id}/${Date.now()}.${ext}`
     const { error: upErr } = await supabase.storage.from('attachments').upload(path, file)
     if (upErr) { toast.error('Nepodařilo se nahrát obrázek'); return null }
-    return supabase.storage.from('attachments').getPublicUrl(path).data.publicUrl
+    return path // ukládáme cestu; renderuje se přes signed URL
   }
 
   async function handleImagePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -607,10 +655,10 @@ export function TaskDetailModal({ task, subprojects, members, projectId, onClose
                     className={`w-full resize-none ${inputClass}`} />
                   {attachedImages.length > 0 && (
                     <div className="flex flex-wrap gap-2">
-                      {attachedImages.map((url, i) => (
+                      {attachedImages.map((val, i) => (
                         <div key={i} className="relative group">
-                          <img src={url} alt="" className="h-16 w-16 object-cover rounded-lg border border-gray-200 dark:border-gray-700 cursor-zoom-in"
-                            onClick={() => setLightboxSrc(url)} />
+                          <AttImg value={val} className="h-16 w-16 object-cover rounded-lg border border-gray-200 dark:border-gray-700 cursor-zoom-in"
+                            onClick={setLightboxSrc} />
                           <button onClick={() => setAttachedImages(prev => prev.filter((_, j) => j !== i))}
                             className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity leading-none">
                             ×
@@ -648,40 +696,10 @@ export function TaskDetailModal({ task, subprojects, members, projectId, onClose
               </div>
               {attachments.length > 0 && (
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {attachments.map(att => {
-                    const url = supabase.storage.from('attachments').getPublicUrl(att.file_path).data.publicUrl
-                    const isImg = /\.(jpe?g|png|gif|webp|svg)$/i.test(att.name) || att.mime_type?.startsWith('image/')
-                    return (
-                      <div key={att.id} className="group relative rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden bg-gray-50 dark:bg-gray-800 flex flex-col">
-                        {isImg ? (
-                          <div className="h-24 bg-gray-100 dark:bg-gray-700 overflow-hidden cursor-zoom-in"
-                            onClick={() => setLightboxSrc(url)}>
-                            <img src={url} alt={att.name} className="w-full h-full object-cover" />
-                          </div>
-                        ) : (
-                          <div className="h-24 flex items-center justify-center bg-gray-100 dark:bg-gray-800">
-                            <FileText size={32} className="text-gray-300 dark:text-gray-600" />
-                          </div>
-                        )}
-                        <div className="px-2 py-1.5 flex items-center gap-1.5 min-w-0">
-                          <span className="text-xs text-gray-700 dark:text-gray-300 truncate flex-1" title={att.name}>{att.name}</span>
-                          <a href={url} download={att.name} target="_blank" rel="noreferrer"
-                            className="shrink-0 p-1 text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors" title="Stáhnout">
-                            <Download size={12} />
-                          </a>
-                          {canFullEdit && (
-                            <button onClick={() => handleDeleteAttachment(att.id, att.file_path)}
-                              className="shrink-0 p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors" title="Smazat">
-                              <Trash2 size={12} />
-                            </button>
-                          )}
-                        </div>
-                        {att.file_size && (
-                          <span className="absolute top-1.5 right-1.5 text-[10px] bg-black/50 text-white rounded px-1 py-0.5 leading-none">{formatFileSize(att.file_size)}</span>
-                        )}
-                      </div>
-                    )
-                  })}
+                  {attachments.map(att => (
+                    <AttachmentCard key={att.id} att={att} canEdit={canFullEdit}
+                      onLightbox={setLightboxSrc} onDelete={handleDeleteAttachment} />
+                  ))}
                 </div>
               )}
               <input ref={attachFileRef} type="file" multiple className="hidden" onChange={handleAddAttachment} />

@@ -11,6 +11,7 @@ import {
 import { arrayMove } from '@dnd-kit/sortable'
 import { snapCenterToCursor } from '@dnd-kit/modifiers'
 import { supabase } from '@/lib/supabase'
+import { useSignedUrl } from '@/lib/storage'
 import { useAuthStore } from '@/stores/authStore'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Avatar } from '@/components/ui/Avatar'
@@ -25,6 +26,17 @@ import { TaskGroup } from './TaskGroup'
 import { ManageSubprojectsModal } from './ManageSubprojectsModal'
 import { EditProjectModal } from './EditProjectModal'
 import { BulkCreateTasksModal } from './BulkCreateTasksModal'
+
+function ProjectModelThumb({ path, name }: { path: string | null; name: string }) {
+  const url = useSignedUrl('models', path)
+  return (
+    <div className="h-28 bg-gray-100 dark:bg-gray-800 flex items-center justify-center overflow-hidden">
+      {url
+        ? <img src={url} alt={name} className="w-full h-full object-cover" />
+        : <Box size={32} className="text-gray-300 dark:text-gray-600 group-hover:text-indigo-400 transition-colors" />}
+    </div>
+  )
+}
 
 function SkeletonTaskGroups() {
   return (
@@ -727,17 +739,10 @@ export function ProjectPage() {
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                 {projectModels.map(model => {
-                  const thumbUrl = model.thumbnail_path
-                    ? supabase.storage.from('models').getPublicUrl(model.thumbnail_path).data.publicUrl
-                    : null
                   return (
                     <Link key={model.id} to={`/models?model=${model.id}`}
                       className="group rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-md transition-all">
-                      <div className="h-28 bg-gray-100 dark:bg-gray-800 flex items-center justify-center overflow-hidden">
-                        {thumbUrl
-                          ? <img src={thumbUrl} alt={model.name} className="w-full h-full object-cover" />
-                          : <Box size={32} className="text-gray-300 dark:text-gray-600 group-hover:text-indigo-400 transition-colors" />}
-                      </div>
+                      <ProjectModelThumb path={model.thumbnail_path} name={model.name} />
                       <div className="px-2 py-1.5">
                         <p className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate">{model.name}</p>
                       </div>

@@ -8,6 +8,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
 import * as THREE from 'three'
 import { supabase } from '@/lib/supabase'
+import { useSignedUrl } from '@/lib/storage'
 import { useAuthStore } from '@/stores/authStore'
 import { scatterOnMesh, mulberry32 } from '@/viewer-core/Vegetation'
 
@@ -303,9 +304,9 @@ export function BackgroundScene() {
     staleTime: Infinity,
   })
 
-  if (skip || !modelRow) return null
+  const modelUrl = useSignedUrl('models', modelRow?.file_path)
 
-  const modelUrl = supabase.storage.from('models').getPublicUrl(modelRow.file_path).data.publicUrl
+  if (skip || !modelRow || !modelUrl) return null
 
   return (
     <div

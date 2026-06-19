@@ -1,5 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
+import { signedUrl } from '@/lib/storage'
 import { useAuthStore } from '@/stores/authStore'
 import type { ModelObjectColor } from '@/lib/types'
 import type { ViewerAdapter, VegGroup, SceneOrg, CameraState, MaterialDef } from '@/viewer-core'
@@ -182,7 +183,7 @@ export function makeSupabaseViewerAdapter(queryClient: QueryClient): ViewerAdapt
     },
 
     async getTextureUrl(path) {
-      return supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl
+      return (await signedUrl(BUCKET, path)) ?? ''
     },
 
     onViewerClosed(modelId, { canvas, cameraState }) {

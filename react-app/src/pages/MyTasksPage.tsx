@@ -6,6 +6,8 @@ import { toast } from 'sonner'
 import { MessageSquare, Send, Trash2, Paperclip, MapPin, ExternalLink } from 'lucide-react'
 import { useConfirm } from '@/components/ui/ConfirmDialog'
 import { supabase } from '@/lib/supabase'
+import { SignedImg } from '@/lib/storage'
+import { isImageUrl } from '@/pages/ProjectPage/shared'
 import { useAuthStore } from '@/stores/authStore'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { StatusBadge, PriorityBadge } from '@/components/ui/Badge'
@@ -57,7 +59,7 @@ function TaskDetailModal({ task, onClose, onSaved }: {
     const path = `comment-images/${task?.id}/${Date.now()}.${ext}`
     const { error: upErr } = await supabase.storage.from('attachments').upload(path, file)
     if (upErr) { toast.error('Nepodařilo se nahrát obrázek'); return null }
-    return supabase.storage.from('attachments').getPublicUrl(path).data.publicUrl
+    return path // ukládáme cestu; renderuje se přes signed URL
   }
 
   async function handleImagePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -327,8 +329,8 @@ function TaskDetailModal({ task, onClose, onSaved }: {
                   </div>
                   <div className="text-sm text-gray-700 dark:text-gray-300 mt-0.5">
                     {c.text.split('\n').map((line, i, arr) =>
-                      /^https?:\/\/\S+\.(jpe?g|png|gif|webp)(\?\S*)?$/i.test(line.trim()) || /\/storage\/v1\/object\/public\//.test(line.trim())
-                        ? <img key={i} src={line.trim()} alt="" className="max-w-full max-h-64 rounded-lg mt-1 block cursor-zoom-in" onClick={() => setLightboxSrc(line.trim())} />
+                      isImageUrl(line.trim())
+                        ? <SignedImg key={i} bucket="attachments" value={line.trim()} className="max-w-full max-h-64 rounded-lg mt-1 block cursor-zoom-in" onClick={setLightboxSrc} />
                         : <span key={i}>{line}{i < arr.length - 1 && <br />}</span>
                     )}
                   </div>
@@ -340,10 +342,10 @@ function TaskDetailModal({ task, onClose, onSaved }: {
           <div className="flex flex-col gap-2">
             {attachedImages.length > 0 && (
               <div className="flex flex-wrap gap-2">
-                {attachedImages.map((url, i) => (
+                {attachedImages.map((val, i) => (
                   <div key={i} className="relative group">
-                    <img src={url} alt="" className="h-16 w-16 object-cover rounded-lg border border-gray-200 dark:border-gray-700 cursor-zoom-in"
-                      onClick={() => setLightboxSrc(url)} />
+                    <SignedImg bucket="attachments" value={val} className="h-16 w-16 object-cover rounded-lg border border-gray-200 dark:border-gray-700 cursor-zoom-in"
+                      onClick={setLightboxSrc} />
                     <button onClick={() => setAttachedImages(prev => prev.filter((_, j) => j !== i))}
                       className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity leading-none">
                       ×

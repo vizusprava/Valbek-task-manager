@@ -8,5 +8,7 @@ export function formatFileSize(bytes: number): string {
 
 export function isImageUrl(s: string) {
   return /^https?:\/\/\S+\.(jpe?g|png|gif|webp)(\?\S*)?$/i.test(s)
-    || /\/storage\/v1\/object\/public\//.test(s)
+    || /\/storage\/v1\/object\/(public|sign)\//.test(s)
+    // nově: holá cesta v privátním bucketu (obrázky komentářů se ukládají jako cesta)
+    || /^comment-images\/\S+\.(jpe?g|png|gif|webp)$/i.test(s)
 }
