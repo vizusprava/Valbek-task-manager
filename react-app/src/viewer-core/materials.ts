@@ -39,6 +39,44 @@ export function detectMapType(fileName: string): TextureMapType | null {
 
 export const TEXTURE_MAX_DIM = 2048
 
+/**
+ * Rozparsuje název souloru textury na materiál + typ mapy.
+ * Konvence: <prefix>_<jméno>_<rozlišení>_<mapa>.ext, mapa je poslední token.
+ * Příklad: `TCom_Brick_Modern_2K_albedo.tif` → { name: "Brick Modern", mapType: "albedo" }
+ */
+export function parseMaterialFile(fileName: string): { name: string; groupKey: string; mapType: TextureMapType } | null {
+  const base = fileName.replace(/\.[^.]+$/, '')
+  const tokens = base.split('_').filter(Boolean)
+  if (tokens.length < 2) return null
+  const mapType = detectMapType(tokens[tokens.length - 1])
+  if (!mapType) return null
+  const keyTokens = tokens.slice(0, -1)
+  // jméno: zahoď prefix "TCom", token rozlišení (1K/2K) a rozměr dlaždice (1.5x1.5)
+  const nameTokens = keyTokens.filter((t, i) =>
+    !(i === 0 && /^tcom$/i.test(t)) &&
+    !/^\d+k$/i.test(t) &&
+    !/^\d+(\.\d+)?x\d+(\.\d+)?$/i.test(t))
+  const name = (nameTokens.join(' ') || keyTokens.join(' ')).trim()
+  return { name, groupKey: keyTokens.join('_').toLowerCase(), mapType }
+}
+
+/** Seskupí ploché soubory textur do materiálů podle názvu. Vrátí i nerozpoznané. */
+export function groupMaterialFiles(files: File[]): {
+  groups: { name: string; maps: { mapType: TextureMapType; file: File }[] }[]
+  skipped: string[]
+} {
+  const map = new Map<string, { name: string; maps: { mapType: TextureMapType; file: File }[] }>()
+  const skipped: string[] = []
+  for (const file of files) {
+    const p = parseMaterialFile(file.name)
+    if (!p) { skipped.push(file.name); continue }
+    let g = map.get(p.groupKey)
+    if (!g) { g = { name: p.name, maps: [] }; map.set(p.groupKey, g) }
+    if (!g.maps.some(m => m.mapType === p.mapType)) g.maps.push({ mapType: p.mapType, file })
+  }
+  return { groups: [...map.values()], skipped }
+}
+
 const TIFF_RE = /\.tiff?$/i
 
 /** Prohlížeč TIFF nedekóduje — UTIF.js ho rozbalí do canvasu. */
@@ -68,10 +106,12 @@ function toBlobAsync(canvas: HTMLCanvasElement, type: string, quality?: number):
  * Normal mapy se nechávají v originálu beze změny (žádná rekomprese = žádná ztráta detailů);
  * TIFF normal mapa se převede bezeztrátově do PNG v plném rozlišení.
  */
-export async function processTextureFile(file: File, mapType: TextureMapType): Promise<{ blob: Blob; ext: string }> {
+export async function processTextureFile(file: File, mapType: TextureMapType, maxDim = TEXTURE_MAX_DIM): Promise<{ blob: Blob; ext: string }> {
   const isTiff = TIFF_RE.test(file.name) || file.type === 'image/tiff'
+  const isNormal = mapType === 'normal'
 
-  if (mapType === 'normal' && !isTiff) {
+  // normal v běžném formátu bez požadavku na downscale → originál (žádná rekomprese)
+  if (isNormal && !isTiff && maxDim >= TEXTURE_MAX_DIM) {
     const ext = (file.name.split('.').pop() || 'png').toLowerCase()
     return { blob: file, ext }
   }
@@ -80,15 +120,21 @@ export async function processTextureFile(file: File, mapType: TextureMapType): P
     ? await tiffToCanvas(file)
     : await createImageBitmap(file)
 
-  if (mapType === 'normal') {
-    // TIFF normal mapa — plné rozlišení, bezeztrátové PNG
-    const canvas = source as HTMLCanvasElement
+  if (isNormal) {
+    // normal mapa — bezeztrátové PNG (po případném zmenšení na maxDim)
+    const scale = Math.min(1, maxDim / Math.max(source.width, source.height))
+    const w = Math.max(1, Math.round(source.width * scale))
+    const h = Math.max(1, Math.round(source.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = w; canvas.height = h
+    canvas.getContext('2d')!.drawImage(source, 0, 0, w, h)
+    if (source instanceof ImageBitmap) source.close()
     const png = await toBlobAsync(canvas, 'image/png')
     if (!png) throw new Error('Konverze textury selhala')
     return { blob: png, ext: 'png' }
   }
 
-  const scale = Math.min(1, TEXTURE_MAX_DIM / Math.max(source.width, source.height))
+  const scale = Math.min(1, maxDim / Math.max(source.width, source.height))
   const w = Math.max(1, Math.round(source.width * scale))
   const h = Math.max(1, Math.round(source.height * scale))
   const canvas = document.createElement('canvas')

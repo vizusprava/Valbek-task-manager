@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Palette, Plus, Trash2, X, Check } from 'lucide-react'
+import { Palette, Plus, Trash2, X, Check, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import type { MaterialDef, MaterialAssignment, TextureMapType, ViewerAdapter } from './adapter'
-import { MAP_LABELS, detectMapType, processTextureFile } from './materials'
+import { MAP_LABELS, detectMapType, processTextureFile, groupMaterialFiles } from './materials'
+
+/** Hromadný import sráží textury na 1K, ať knihovna nenabobtná. */
+const IMPORT_MAX_DIM = 1024
 
 const MAP_SLOTS: TextureMapType[] = ['albedo', 'normal', 'roughness', 'metalness', 'ao', 'emissive', 'opacity', 'height']
 
@@ -156,6 +159,43 @@ export function MaterialsPanel({
     }
   }
 
+  // hromadný import: plochá složka textur → seskupit do materiálů a založit
+  const [importProg, setImportProg] = useState<{ done: number; total: number; name: string } | null>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
+
+  async function handleBulkImport(list: FileList) {
+    const { groups, skipped } = groupMaterialFiles(Array.from(list))
+    if (!groups.length) {
+      toast.error('Nerozpoznal jsem žádný materiál. Očekávám soubory typu „Nazev_1K_albedo.tif".')
+      return
+    }
+    const existing = new Set(materials.map(m => m.name.toLowerCase()))
+    const todo = groups.filter(g => !existing.has(g.name.toLowerCase()))
+    const skippedExisting = groups.length - todo.length
+
+    let ok = 0
+    for (const g of todo) {
+      setImportProg({ done: ok, total: todo.length, name: g.name })
+      try {
+        const id = crypto.randomUUID()
+        const maps: Partial<Record<TextureMapType, string>> = {}
+        for (const { mapType, file } of g.maps) {
+          const { blob, ext } = await processTextureFile(file, mapType, IMPORT_MAX_DIM)
+          maps[mapType] = await adapter.uploadTexture(id, mapType, blob, ext)
+        }
+        onSaveMaterial({ id, name: g.name, tint: '#ffffff', roughness: 0.9, metalness: 0, maps })
+        ok++
+      } catch (e: unknown) {
+        toast.error(`${g.name}: ${e instanceof Error ? e.message : 'import selhal'}`)
+      }
+    }
+    setImportProg(null)
+    const parts = [`Importováno ${ok} materiálů`]
+    if (skippedExisting) parts.push(`${skippedExisting} už existuje`)
+    if (skipped.length)  parts.push(`${skipped.length} souborů nerozpoznáno`)
+    toast.success(parts.join(', '))
+  }
+
   const selectedDef = materials.find(m => m.id === selectedId) ?? null
 
   return (
@@ -200,6 +240,38 @@ export function MaterialsPanel({
         </div>
         {materials.length === 0 && !canEdit && (
           <p className="text-xs text-gray-600 text-center">Zatím žádné materiály</p>
+        )}
+
+        {/* Hromadný import textur z plochy složky */}
+        {canEdit && (
+          <div>
+            <button
+              onClick={() => importInputRef.current?.click()}
+              disabled={!!importProg}
+              title="Vyber všechny soubory textur — seskupím je do materiálů podle názvu"
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium border border-dashed border-gray-700 hover:border-indigo-500/70 text-gray-400 hover:text-indigo-400 disabled:opacity-50 rounded-lg transition-colors"
+            >
+              <Upload size={12} />
+              {importProg ? `Importuji… ${importProg.done}/${importProg.total}` : 'Hromadný import textur'}
+            </button>
+            {importProg && (
+              <div className="mt-1.5 space-y-1">
+                <div className="h-1 bg-gray-800 rounded overflow-hidden">
+                  <div className="h-full bg-indigo-500 transition-all"
+                    style={{ width: `${importProg.total ? (importProg.done / importProg.total) * 100 : 0}%` }} />
+                </div>
+                <p className="text-[10px] text-gray-500 truncate">{importProg.name}</p>
+              </div>
+            )}
+            <input
+              ref={importInputRef}
+              type="file"
+              multiple
+              accept=".tif,.tiff,.png,.jpg,.jpeg,.webp"
+              className="hidden"
+              onChange={e => { if (e.target.files?.length) handleBulkImport(e.target.files); e.target.value = '' }}
+            />
+          </div>
         )}
 
         {/* Aplikace na cíl */}
