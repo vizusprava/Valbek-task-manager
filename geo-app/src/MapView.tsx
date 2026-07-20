@@ -23,6 +23,18 @@ import { toast } from 'sonner'
 import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload, Move, Crosshair, Trash2, ArrowDownToLine, RotateCcw, MapPin, Mountain, Download, Eye, EyeOff, Hexagon, Check, Sparkles, Grid3x3 } from 'lucide-react'
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined
+
+// ── Přepínače funkcí (skrýt, ne mazat) ─────────────────────────────────────────────
+// Pro nasazení v task-manageru nepotřebujeme Google 3D, OSM budovy ani městské části Liberce.
+// Vypnutím zmizí jen tlačítka; funkce (ensureGoogle/ensureOsm/toggleDistricts) v kódu zůstávají,
+// takže se to kdykoliv vrátí přepnutím na true. Vše je líné → skryté tlačítko = nula výkonu.
+// POZOR: ion token používá JEN Google 3D a OSM budovy. Když jsou oba false, token není potřeba
+// (terén DMR i ortofoto jedou přímo z ČÚZK) → odpadá i celý problém s 401 na ion.
+const ENABLE_GOOGLE_3D = false
+const ENABLE_OSM_BUILDINGS = false
+const ENABLE_LIBEREC_DISTRICTS = false
+const NEEDS_ION = ENABLE_GOOGLE_3D || ENABLE_OSM_BUILDINGS
+
 // Google Photorealistic 3D Tiles streamované přes Cesium ion (stačí ion token, žádný Google klíč).
 // Asset je nutné jednorázově přidat ve svém ion účtu (Asset Depot → Google Photorealistic 3D Tiles).
 const GOOGLE_3D_ION_ASSET = 2275207
@@ -952,7 +964,19 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       setGoogleLoading(true)
       ensureGoogle(v)
         .then(ts => { if (ts) ts.show = true })
-        .catch(() => setGoogleErr('Google 3D se nenačetlo — přidej asset „Google Photorealistic 3D Tiles" ve svém ion účtu (Asset Depot).'))
+        .catch((e: unknown) => {
+          console.error('Google 3D Tiles selhalo:', e)
+          // Cesium RequestErrorEvent nese statusCode; podle něj poznáme, co je vážně špatně,
+          // místo abychom natvrdo hlásili „chybí asset" (což bývá nejmíň častá příčina).
+          const code = (e as { statusCode?: number })?.statusCode
+          const msg = e instanceof Error ? e.message : String(e)
+          if (code === 401 || /401|unauthor|token/i.test(msg))
+            setGoogleErr('Google 3D: ion token odmítnut (401). Zkontroluj, že token v nasazené appce je platný a nemá doménové omezení, které blokuje tuhle stránku.')
+          else if (code === 404)
+            setGoogleErr('Google 3D: asset 2275207 nenalezen (404) — přidej „Google Photorealistic 3D Tiles" ve svém ion účtu (Asset Depot).')
+          else
+            setGoogleErr(`Google 3D se nenačetlo${code ? ` (HTTP ${code})` : ''}: ${msg}`)
+        })
         .finally(() => setGoogleLoading(false))
     } else if (googleRef.current) {
       googleRef.current.show = false
@@ -2004,9 +2028,9 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         onChange={e => { const f = e.target.files?.[0]; if (f) importModel(f); e.target.value = '' }}
       />
 
-      {!ION_TOKEN && (
+      {NEEDS_ION && !ION_TOKEN && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 px-3 py-1.5 rounded-lg bg-amber-900/80 border border-amber-600/50 text-amber-200 text-xs">
-          Chybí VITE_CESIUM_ION_TOKEN — terén z ion nepoběží
+          Chybí VITE_CESIUM_ION_TOKEN — Google 3D / OSM budovy nepoběží
         </div>
       )}
 
@@ -2047,8 +2071,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1">Podklad</div>
         <ToggleBtn active={base === 'ortofoto'} onClick={() => setBase('ortofoto')} icon={<Image size={15} />} label="Ortofoto ČR" />
         <ToggleBtn active={base === 'zm'} onClick={() => setBase('zm')} icon={<MapIcon size={15} />} label={base === 'zm' ? `Topografická mapa (${ztmTier})` : 'Topografická mapa ČR'} />
-        <ToggleBtn active={base === 'google'} onClick={() => setBase('google')} icon={googleLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="3D realita (Google)" />
-        {base === 'google' ? (
+        {ENABLE_GOOGLE_3D && (
+          <ToggleBtn active={base === 'google'} onClick={() => setBase('google')} icon={googleLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="3D realita (Google)" />
+        )}
+        {ENABLE_GOOGLE_3D && base === 'google' ? (
           <div className="px-1 text-[10px] text-gray-500 max-w-[180px] leading-snug">
             {googleErr
               ? <span className="text-amber-400">{googleErr}</span>
@@ -2061,8 +2087,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
             <ToggleBtn active={katastrOn} onClick={() => setKatastrOn(v => !v)} icon={<Layers size={15} />} label="Katastr" />
           </>
         )}
-        <ToggleBtn active={osmOn} onClick={() => setOsmOn(v => !v)} icon={osmLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="Budovy (OSM)" />
-        <ToggleBtn active={districtsOn} onClick={toggleDistricts} icon={districtsLoading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} label="Městské části Liberce" />
+        {ENABLE_OSM_BUILDINGS && (
+          <ToggleBtn active={osmOn} onClick={() => setOsmOn(v => !v)} icon={osmLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="Budovy (OSM)" />
+        )}
+        {ENABLE_LIBEREC_DISTRICTS && (
+          <ToggleBtn active={districtsOn} onClick={toggleDistricts} icon={districtsLoading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} label="Městské části Liberce" />
+        )}
         <div className="h-px bg-gray-700 my-0.5" />
         <ToggleBtn active={parcelMode} onClick={toggleParcel} icon={parcelLoading ? <Loader2 size={15} className="animate-spin" /> : <MapPin size={15} />} label={parcelMode ? 'Klikni na parcelu' : 'Vybrat parcelu'} />
         <ToggleBtn active={areaMode} onClick={toggleAreaMode} icon={areaLoading ? <Loader2 size={15} className="animate-spin" /> : <Hexagon size={15} />} label={areaMode ? `Klikej body (${areaPtCount})` : 'Vybrat oblast'} />
