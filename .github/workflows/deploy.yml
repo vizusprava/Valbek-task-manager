@@ -26,7 +26,9 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: react-app/package-lock.json
+          cache-dependency-path: |
+            react-app/package-lock.json
+            geo-app/package-lock.json
       - name: Install
         run: npm ci
         working-directory: react-app
@@ -36,6 +38,22 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON: ${{ secrets.VITE_SUPABASE_ANON }}
+
+      # Geo Viewer je samostatná appka (kvůli Cesiu, které nejde načíst líně — viz GeoPage.tsx).
+      # Staví se zvlášť a přiloží se do react-app/dist/geo, odkud ho záložka /geo otevírá v iframu.
+      - name: Install geo-app
+        run: npm ci
+        working-directory: geo-app
+      - name: Build geo-app
+        run: npm run build
+        working-directory: geo-app
+        env:
+          VITE_CESIUM_ION_TOKEN: ${{ secrets.VITE_CESIUM_ION_TOKEN }}
+      - name: Copy geo-app into dist/geo
+        run: |
+          mkdir -p react-app/dist/geo
+          cp -r geo-app/dist/. react-app/dist/geo/
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: react-app/dist

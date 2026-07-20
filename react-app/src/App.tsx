@@ -18,6 +18,7 @@ const ThreeDMaxPage = lazy(() => import('@/pages/ThreeDMaxPage').then(m => ({ de
 const ModelsPage    = lazy(() => import('@/pages/ModelsPage').then(m => ({ default: m.ModelsPage })))
 const InspiracePage = lazy(() => import('@/pages/InspiracePage').then(m => ({ default: m.InspiracePage })))
 const TablesPage    = lazy(() => import('@/pages/TablesPage').then(m => ({ default: m.TablesPage })))
+const GeoPage       = lazy(() => import('@/pages/GeoPage').then(m => ({ default: m.GeoPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -91,6 +92,7 @@ export default function App() {
           <Route path="/my-tasks" element={<AuthGuard><MyTasksPage /></AuthGuard>} />
           <Route path="/3dmax" element={<AuthGuard><ThreeDMaxPage /></AuthGuard>} />
           <Route path="/models" element={<AuthGuard><ModelsPage /></AuthGuard>} />
+          <Route path="/geo" element={<AuthGuard><GeoPage /></AuthGuard>} />
           <Route path="/review" element={<AuthGuard><AdminGuard><ReviewPage /></AdminGuard></AuthGuard>} />
           <Route path="/reports" element={<AuthGuard><ReportsPage /></AuthGuard>} />
           <Route path="/inspiration" element={<AuthGuard><InspiracePage /></AuthGuard>} />

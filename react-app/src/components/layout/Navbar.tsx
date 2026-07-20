@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
   Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes, Lightbulb, Table2,
+  Map as MapIcon,
   type LucideIcon,
 } from 'lucide-react'
 import { useAuthStore, applyUserBg } from '@/stores/authStore'
@@ -236,6 +237,7 @@ export function Navbar() {
         {navItem('/my-tasks',   'Moje úkoly',    ListTodo)}
         {navItem('/3dmax',      '3DMax',          Box)}
         {navItem('/models',     '3D Modely',      Boxes)}
+        {navItem('/geo',        'Geo Viewer',     MapIcon)}
         {admin && !['nela', 'lenka'].includes(profile?.name?.toLowerCase() ?? '') && navItem('/review',  'Ke kontrole', ClipboardCheck, reviewCount)}
         {navItem('/reports',    'Reporty',        BarChart2)}
         {navItem('/inspiration', 'Inspirace',     Lightbulb)}
