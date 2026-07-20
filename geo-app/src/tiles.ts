@@ -36,6 +36,29 @@ export type TexSize = (typeof TEX_SIZES)[number]
 const ORTO_EXPORT = 'https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO/MapServer/export'
 const DMR_EXPORT = 'https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer/exportImage'
 
+// ── Spojená 2D mapa (ortofoto + topografická) přes dlaždice ─────────────────────────
+// Topografická mapa ČR (ZTM) je stylovaná podle měřítka → podle rozlohy výběru vybíráme tier.
+export type MapLayer = 'ortofoto' | 'topo'
+const TOPO_TIERS: { code: string; maxSpanM: number }[] = [
+  { code: 'ZTM10', maxSpanM: 3000 },
+  { code: 'ZTM25', maxSpanM: 9000 },
+  { code: 'ZTM50', maxSpanM: 25000 },
+  { code: 'ZTM100', maxSpanM: 70000 },
+  { code: 'ZTM250', maxSpanM: Infinity },
+]
+export function pickTopoTier(spanM: number): string {
+  for (const t of TOPO_TIERS) if (spanM <= t.maxSpanM) return t.code
+  return 'ZTM250'
+}
+
+/** REST export URL pro libovolný S-JTSK obdélník (px šířka×výška). Stylovanou topo mapu
+ *  bereme po velkých blocích, ne po dlaždicích — jinak ČÚZK ořezává popisky na každém švu. */
+export function mapBboxUrl(x0: number, y0: number, x1: number, y1: number, w: number, h: number, layer: MapLayer, tier: string): string {
+  const box = `${x0},${y0},${x1},${y1}&bboxSR=5514&imageSR=5514&size=${w},${h}`
+  if (layer === 'ortofoto') return `${ORTO_EXPORT}?bbox=${box}&format=jpg&f=image`
+  return `https://ags.cuzk.gov.cz/arcgis1/rest/services/ZTM/${tier}/MapServer/export?bbox=${box}&format=png&f=image`
+}
+
 export type Tile = { ix: number; iy: number; size: number }
 export type Offset = { x: number; y: number; z: number }
 export type TileGrid = { n: number; h: Float32Array }

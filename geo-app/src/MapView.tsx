@@ -8,12 +8,12 @@ import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
-import { Zip, ZipDeflate, ZipPassThrough, strToU8 } from 'three/examples/jsm/libs/fflate.module.js'
+import { Zip, ZipDeflate, ZipPassThrough, zipSync, strToU8 } from 'three/examples/jsm/libs/fflate.module.js'
 import {
   TILE_SIZES, MESH_STEPS, MESH_STEP_DEFAULT, TEX_SIZES, type TileSize, type MeshStep, type TexSize,
-  type Tile, type Offset, tileKey, tileName, tileAt, tilesBounds, tileRingLL,
+  type Tile, type Offset, tileKey, tileName, tileAt, tilesBounds, tileRingLL, wgsOf, sjtskOf,
   pool, fetchTileHeights, fetchTileOrtho, buildTileObj, buildMtl, buildMaxScript, medianHeight,
-  gridSize, stepOf, concatBytes, estimateObjBytes,
+  gridSize, stepOf, concatBytes, estimateObjBytes, mapBboxUrl, pickTopoTier, type MapLayer,
 } from './tiles'
 import proj4 from 'proj4'
 import { fromArrayBuffer } from 'geotiff'
@@ -796,13 +796,21 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const areaEntsRef = useRef<Cesium.Entity[]>([])
 
   const [tileMode, setTileMode] = useState(false)
-  const [tileSize, setTileSize] = useState<TileSize>(500)
+  const [tileSize, setTileSize] = useState<TileSize>(1000)
   const [texSize, setTexSize] = useState<TexSize>(2048)
   const [meshStep, setMeshStep] = useState<MeshStep>(MESH_STEP_DEFAULT)
+  // strop delší strany spojené 2D mapy (px). 16384 ≈ hranice canvasu prohlížeče (~1 GB paměti).
+  const [stitchMax, setStitchMax] = useState(8192)
   const [tileCount, setTileCount] = useState(0)
   const [tileBusy, setTileBusy] = useState(false)
   const [tileProgress, setTileProgress] = useState('')
   const tilesRef = useRef<Map<string, { tile: Tile; ent: Cesium.Entity }>>(new Map())
+  // mřížka dlaždic přes viditelnou oblast (jako kladení listů na ČÚZK) — zap/vyp overlay s názvy
+  const [gridOn, setGridOn] = useState(false)
+  const [gridNote, setGridNote] = useState('')
+  const gridEntsRef = useRef<Cesium.Entity[]>([])
+  // přibalit do exportu i hranice parcel (katastr) jako DXF křivky
+  const [exportKatastr, setExportKatastr] = useState(false)
   // detailní DMR-5G výseky
   const [dmrLoading, setDmrLoading] = useState(false)
   const [patchCount, setPatchCount] = useState(0)
@@ -1252,7 +1260,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   }
 
   function toggleTileMode() {
-    if (tileMode) { setTileMode(false); return }
+    if (tileMode) { setTileMode(false); setGridOn(false); return } // ať mřížka nezůstane viset bez tlačítka
     setMoveMode(false); setParcelMode(false)
     if (areaMode) { clearArea(); setAreaMode(false) }
     setTileMode(true)
@@ -1263,6 +1271,138 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     if (s === tileSize) return
     clearTiles()
     setTileSize(s)
+  }
+
+  // ── Overlay mřížky dlaždic s názvy (jako kladení listů na ČÚZK) ──────────────────
+  // Přepočítává se podle pohledu kamery. Aby to nezahltilo scénu, čáry i názvy mají strop:
+  // moc dlaždic ve výřezu → napíšeme „přibliž" místo tisíců entit.
+  const GRID_MAX_LINES = 4000  // nad tolik dlaždic nekreslíme ani čáry
+  const GRID_MAX_LABELS = 400  // nad tolik jen čáry, názvy až po přiblížení
+
+  function clearGrid() {
+    const v = viewerRef.current
+    if (v && !v.isDestroyed()) for (const e of gridEntsRef.current) v.entities.remove(e)
+    gridEntsRef.current = []
+  }
+
+  function redrawGrid() {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    clearGrid()
+    if (!gridOn) { setGridNote(''); return }
+
+    // co je vidět (obdélník lon/lat); při pohledu k horizontu je undefined
+    const rect = v.camera.computeViewRectangle(v.scene.globe.ellipsoid)
+    if (!rect) { setGridNote('Naklop kameru na mapu'); return }
+    const wLon = Cesium.Math.toDegrees(rect.west), eLon = Cesium.Math.toDegrees(rect.east)
+    const sLat = Cesium.Math.toDegrees(rect.south), nLat = Cesium.Math.toDegrees(rect.north)
+
+    // rohy výřezu do S-JTSK → obálka v Křováku (mřížka je zarovnaná na S-JTSK)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const [lo, la] of [[wLon, sLat], [eLon, sLat], [eLon, nLat], [wLon, nLat]] as [number, number][]) {
+      const [x, y] = sjtskOf(lo, la)
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+    }
+    const size = tileSize
+    const ix0 = Math.floor(minX / size), ix1 = Math.floor(maxX / size)
+    const iy0 = Math.floor(minY / size), iy1 = Math.floor(maxY / size)
+    const nx = ix1 - ix0 + 1, ny = iy1 - iy0 + 1
+    const count = nx * ny
+    if (count <= 0 || count > GRID_MAX_LINES) { setGridNote(count > GRID_MAX_LINES ? 'Přibliž pro zobrazení mřížky' : ''); return }
+
+    // přímka v S-JTSK je ve WGS84 mírně zakřivená → zhustit body na hranách buněk
+    const linePts = (x0: number, y0: number, x1: number, y1: number, seg: number) => {
+      const out: Cesium.Cartesian3[] = []
+      for (let k = 0; k <= seg; k++) { const t = k / seg; const [lo, la] = wgsOf(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t); out.push(Cesium.Cartesian3.fromDegrees(lo, la)) }
+      return out
+    }
+    const gridColor = MODEL_GLOW.withAlpha(0.55)
+    // svislé čáry mřížky (na každé hranici ix)
+    for (let ix = ix0; ix <= ix1 + 1; ix++) {
+      gridEntsRef.current.push(v.entities.add({
+        polyline: { positions: linePts(ix * size, iy0 * size, ix * size, (iy1 + 1) * size, ny + 1), width: 1, material: gridColor, clampToGround: true },
+      }))
+    }
+    // vodorovné čáry mřížky (na každé hranici iy)
+    for (let iy = iy0; iy <= iy1 + 1; iy++) {
+      gridEntsRef.current.push(v.entities.add({
+        polyline: { positions: linePts(ix0 * size, iy * size, (ix1 + 1) * size, iy * size, nx + 1), width: 1, material: gridColor, clampToGround: true },
+      }))
+    }
+
+    // názvy do středů buněk — jen když jich není moc, jinak by se překrývaly a brzdily
+    if (count > GRID_MAX_LABELS) { setGridNote(`${count} dlaždic — přibliž pro názvy`); return }
+    setGridNote('')
+    for (let ix = ix0; ix <= ix1; ix++) {
+      for (let iy = iy0; iy <= iy1; iy++) {
+        const [lo, la] = wgsOf((ix + 0.5) * size, (iy + 0.5) * size)
+        gridEntsRef.current.push(v.entities.add({
+          position: Cesium.Cartesian3.fromDegrees(lo, la),
+          label: {
+            text: `${ix}, ${iy}`,
+            font: 'bold 12px monospace',
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 3,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            scaleByDistance: new Cesium.NearFarScalar(2000, 1.0, 30000, 0.5),
+          },
+        }))
+      }
+    }
+  }
+
+  // překresli mřížku při zapnutí, změně velikosti dlaždice a po každém pohybu kamery
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    redrawGrid()
+    if (!gridOn) return
+    const off = () => redrawGrid()
+    v.camera.moveEnd.addEventListener(off)
+    return () => { v.camera.moveEnd.removeEventListener(off); clearGrid() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gridOn, tileSize])
+
+  /**
+   * Hranice parcel (katastr) pro obálku dlaždic → DXF v REÁLNÉM S-JTSK, výšky z DMR.
+   * Sedí to na terén i OBJ bez přepočtu: WFS vrací parcely rovnou v EPSG:5514 (stejná soustava
+   * jako vrcholy dlaždic) a DMR výšky jsou Bpv (stejné jako Z terénu). Vrací DXF text + počet parcel.
+   */
+  async function fetchKatastrDxf(minX: number, minY: number, maxX: number, maxY: number): Promise<{ dxf: string; count: number } | null> {
+    // S-JTSK obálka → lon/lat bbox pro WFS
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity
+    for (const [x, y] of [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]] as [number, number][]) {
+      const [lo, la] = wgsOf(x, y)
+      minLon = Math.min(minLon, lo); maxLon = Math.max(maxLon, lo); minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la)
+    }
+    const parcels = await fetchParcelsInBbox(minLon, minLat, maxLon, maxLat)
+    if (!parcels.length) return null
+
+    const span = Math.max(maxX - minX, maxY - minY)
+    const size = Math.min(2048, Math.max(512, Math.ceil(span / 5)))
+    const sampler = await fetchElevSampler('dmr5g', minLon, minLat, maxLon, maxLat, size)
+    // náhradní výška pro místa bez DMR dat (kraje) — vzorek ze středu
+    const [cLon, cLat] = wgsOf((minX + maxX) / 2, (minY + maxY) / 2)
+    const fallbackH = sampler(cLon, cLat) ?? 0
+
+    const polylines: [number, number, number][][] = []
+    for (const p of parcels) {
+      const ring = p.ring.slice()
+      // DXF uzavře smyčku sám (flag), tak zahoď duplicitní koncový bod
+      if (ring.length > 1) { const a = ring[0], b = ring[ring.length - 1]; if (Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6) ring.pop() }
+      if (ring.length < 3) continue
+      const pts: [number, number, number][] = ring.map(([x, y]) => {
+        const [lo, la] = wgsOf(x, y)
+        const z = sampler(lo, la)
+        return [x, y, (z ?? fallbackH)] as [number, number, number]
+      })
+      polylines.push(pts)
+    }
+    if (!polylines.length) return null
+    return { dxf: buildDxf(polylines), count: polylines.length }
   }
 
   /**
@@ -1330,6 +1470,18 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       }
       addText('teren.mtl', buildMtl(tiles))
       addText('vray_material.ms', buildMaxScript(tiles))
+
+      // volitelně: hranice parcel (katastr) jako DXF křivky v témže S-JTSK rámci
+      let katastrLine = 'Katastr: ne'
+      if (exportKatastr) {
+        setTileProgress('katastr…')
+        try {
+          const k = await fetchKatastrDxf(minX, minY, maxX, maxY)
+          if (k) { addText('katastr.dxf', k.dxf); katastrLine = `Katastr: katastr.dxf (${k.count} parcel, hranice jako 3D křivky)` }
+          else katastrLine = 'Katastr: v oblasti nenalezeny žádné parcely'
+        } catch (e) { console.error('Katastr do exportu selhal:', e); katastrLine = 'Katastr: stažení selhalo (viz konzole)' }
+      }
+
       addText('info.txt', [
         'Terén DMR 5G + ortofoto (ČÚZK)',
         '',
@@ -1349,7 +1501,11 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         `Dlaždic: ${tiles.length} × ${tileSize} m`,
         `Mřížka terénu: ${stepOf(tiles[0], fetched[0].grid.n).toFixed(3)} m (zdrojový DMR 5G má body po ~2,8 m)`,
         `Textura: ${texSize} px na dlaždici = ${(tileSize / texSize * 100).toFixed(1)} cm/px (ortofoto ČÚZK má nativně 20 cm/px)`,
+        katastrLine,
         'Y je mřížkový sever Křováku, ne pravý sever (meridiánová konvergence ~7°).',
+        '',
+        'katastr.dxf (je-li): hranice parcel jako uzavřené 3D křivky (DXF R12), stejný S-JTSK',
+        'rámec i výšky jako terén → v Maxu lícuje. Import: File > Import > katastr.dxf.',
         '',
         `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
       ].join('\n'))
@@ -1361,6 +1517,145 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     } catch (e) {
       console.error('Export dlaždic selhal:', e)
       toast.error(e instanceof Error ? e.message : 'Export dlaždic selhal')
+    } finally {
+      setTileBusy(false)
+      setTileProgress('')
+    }
+  }
+
+  // Spojená 2D mapa přes obálku výběru: ortofoto i topo mapa jako jeden georeferencovaný obrázek.
+  // Stahuje se po velkých blocích (ne po dlaždicích) → stylovaná topo mapa nemá ořezané popisky
+  // na švech. Výsledek je zastropovaný (paměť canvasu); u velké oblasti klesne rozlišení.
+  const STITCH_CHUNK_PX = 4096  // strop ČÚZK REST na jeden požadavek
+  const STITCH_RES_M = 0.2      // cílové rozlišení (ortofoto má nativně 20 cm/px)
+  const STITCH_MAX_AREA = 16384 * 16384 // pojistka na paměť canvasu (~1 GB), ať to nespadne
+  const TOPO_MAX_PX = 4096      // topo mapa je jen orientační podklad → vždy menší (a ZTM míň zlobí)
+
+  /**
+   * Stáhne jeden blok mapy jako ImageBitmap — s ověřením a opakováním. ČÚZK ArcGIS (hlavně ZTM)
+   * u větších/paralelních požadavků občas vrátí 200 s prázdným (bílým) obrázkem. Velikost je na
+   * detekci nepoužitelná (chyba mívá i 3 MB, reálný list i 10 kB), spolehlivé je jen to, že prázdná
+   * mapa je JEDNOLITÁ plocha → zmenšíme na 16×16 a změříme rozptyl. Reálná mapa má obrovský.
+   */
+  async function loadMapChunk(url: string): Promise<ImageBitmap> {
+    const probe = document.createElement('canvas'); probe.width = 16; probe.height = 16
+    const pctx = probe.getContext('2d', { willReadFrequently: true })
+    let lastErr: unknown = null
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const res = await fetch(url)
+        const ct = res.headers.get('content-type') || ''
+        if (!res.ok || !ct.startsWith('image/')) throw new Error(`HTTP ${res.status} (${ct || 'bez typu'})`)
+        const bmp = await createImageBitmap(await res.blob())
+        if (pctx) {
+          pctx.clearRect(0, 0, 16, 16)
+          pctx.drawImage(bmp, 0, 0, 16, 16)
+          const d = pctx.getImageData(0, 0, 16, 16).data
+          let mn = 255, mx = 0
+          for (let i = 0; i < d.length; i += 4) { const v = (d[i] + d[i + 1] + d[i + 2]) / 3; if (v < mn) mn = v; if (v > mx) mx = v }
+          if (mx - mn < 6) { bmp.close?.(); throw new Error('prázdný/jednolitý obrázek (výpadek ČÚZK)') }
+        }
+        return bmp
+      } catch (e) {
+        lastErr = e
+        if (attempt < 4) await new Promise(r => setTimeout(r, 500 * attempt)) // narůstající pauza
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+  }
+
+  async function exportStitchedMaps() {
+    const tiles = [...tilesRef.current.values()].map(t => t.tile)
+    if (!tiles.length || tileBusy) return
+    setTileBusy(true)
+    setTileProgress('mapa…')
+    try {
+      // S-JTSK obálka výběru (dlaždice jsou souvislé čtverce)
+      let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity
+      for (const t of tiles) { ix0 = Math.min(ix0, t.ix); ix1 = Math.max(ix1, t.ix); iy0 = Math.min(iy0, t.iy); iy1 = Math.max(iy1, t.iy) }
+      const minX = ix0 * tileSize, maxX = (ix1 + 1) * tileSize
+      const minY = iy0 * tileSize, maxY = (iy1 + 1) * tileSize
+      const spanX = maxX - minX, spanY = maxY - minY
+      const tier = pickTopoTier(Math.max(spanX, spanY))
+
+      // Rozměr výstupu na vrstvu: ortofoto je hlavní (plný strop), topo jen orientační podklad
+      // (menší strop) → míň/menší ZTM požadavků = rychlejší a spolehlivější (ZTM zlobí nejvíc).
+      const dims = (cap: number) => {
+        const nW = spanX / STITCH_RES_M, nH = spanY / STITCH_RES_M
+        let sc = Math.min(1, cap / Math.max(nW, nH))
+        if (nW * sc * nH * sc > STITCH_MAX_AREA) sc = Math.sqrt(STITCH_MAX_AREA / (nW * nH))
+        return { W: Math.max(1, Math.round(nW * sc)), H: Math.max(1, Math.round(nH * sc)), sc }
+      }
+      const bounds = (len: number, n: number) => Array.from({ length: n + 1 }, (_, i) => Math.round(i * len / n))
+
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Canvas 2D kontext se nepodařilo získat')
+
+      const files: Record<string, Uint8Array | [Uint8Array, { level: number }]> = {}
+      const toBytes = async (mime: string, quality?: number): Promise<Uint8Array> => {
+        const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, mime, quality))
+        if (!blob) throw new Error('canvas.toBlob selhal')
+        return new Uint8Array(await blob.arrayBuffer())
+      }
+
+      const layers: { layer: MapLayer; file: string; mime: string; wfile: string; cap: number; q?: number }[] = [
+        { layer: 'ortofoto', file: 'ortofoto.jpg', mime: 'image/jpeg', wfile: 'ortofoto.jgw', cap: stitchMax, q: 0.9 },
+        { layer: 'topo', file: 'topografie.png', mime: 'image/png', wfile: 'topografie.pgw', cap: TOPO_MAX_PX },
+      ]
+      // spočítej celkový počet bloků pro průběh
+      const layerPlan = layers.map(L => { const d = dims(L.cap); return { L, ...d, nCols: Math.ceil(d.W / STITCH_CHUNK_PX), nRows: Math.ceil(d.H / STITCH_CHUNK_PX) } })
+      let done = 0
+      const total = layerPlan.reduce((s, p) => s + p.nCols * p.nRows, 0)
+      const meta: Record<string, { W: number; H: number; cm: number; native: boolean }> = {}
+
+      for (const { L, W, H, sc, nCols, nRows } of layerPlan) {
+        canvas.width = W; canvas.height = H
+        ctx.clearRect(0, 0, W, H)
+        const cx = bounds(W, nCols), cy = bounds(H, nRows)
+        const chunks: { c: number; r: number }[] = []
+        for (let r = 0; r < nRows; r++) for (let c = 0; c < nCols; c++) chunks.push({ c, r })
+        // souběh jen 2 — ČÚZK ArcGIS je při paralelní zátěži nespolehlivý (proto ty výpadky)
+        const imgs = await pool(chunks, 2, async ({ c, r }) => {
+          const pxW = cx[c + 1] - cx[c], pxH = cy[r + 1] - cy[r]
+          // blok v S-JTSK (pixelové hranice → poměrná část obálky); sever = horní okraj
+          const bx0 = minX + spanX * cx[c] / W, bx1 = minX + spanX * cx[c + 1] / W
+          const by1 = maxY - spanY * cy[r] / H, by0 = maxY - spanY * cy[r + 1] / H
+          const bmp = await loadMapChunk(mapBboxUrl(bx0, by0, bx1, by1, pxW, pxH, L.layer, tier))
+          setTileProgress(`mapa ${++done}/${total}`)
+          return { c, r, bmp, pxW, pxH }
+        })
+        for (const { c, r, bmp, pxW, pxH } of imgs) { ctx.drawImage(bmp, cx[c], cy[r], pxW, pxH); bmp.close?.() }
+        files[L.file] = [await toBytes(L.mime, L.q), { level: 0 }] // obrázky už komprimované
+        // world file (na vlastní rozměr vrstvy): pixel → S-JTSK, levý-horní pixel = SZ roh
+        const psX = spanX / W, psY = spanY / H
+        files[L.wfile] = strToU8([psX, 0, 0, -psY, minX + psX / 2, maxY - psY / 2].map(n => n.toFixed(6)).join('\n') + '\n')
+        meta[L.layer] = { W, H, cm: spanX / W * 100, native: sc >= 1 }
+      }
+
+      const o = meta.ortofoto, tp = meta.topo
+      files['info.txt'] = strToU8([
+        'Spojená mapa (ČÚZK) — ortofoto + topografická mapa',
+        '',
+        `Oblast S-JTSK (EPSG:5514): X ${minX} … ${maxX}, Y ${minY} … ${maxY}`,
+        `Rozsah: šířka ${spanX.toFixed(0)} m, výška ${spanY.toFixed(0)} m`,
+        '',
+        `ortofoto.jpg:   ${o.W} × ${o.H} px, ${o.cm.toFixed(1)} cm/px${o.native ? ' (nativní)' : ' (zmenšeno kvůli stropu; menší výběr = ostřejší)'}`,
+        `topografie.png: ${tp.W} × ${tp.H} px, ${tp.cm.toFixed(1)} cm/px — jen orientační podklad (${tier})`,
+        '',
+        'Obě vrstvy kryjí STEJNOU oblast, jen v jiném rozlišení — georeference je ve',
+        'world file (.jgw/.pgw) v S-JTSK, takže při stejné velikosti na scéně lícují.',
+        'GIS/CAD je umístí sám; v AE/Max dej každou na plane přes celou oblast.',
+        '',
+        `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
+      ].join('\n'))
+
+      const zipped = zipSync(files as Parameters<typeof zipSync>[0], { level: 6 })
+      download(zipped, `mapa_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
+      toast.success(`Spojená mapa: ortofoto ${o.W}×${o.H} px + topo ${tp.W}×${tp.H} px`)
+    } catch (e) {
+      console.error('Export spojené mapy selhal:', e)
+      toast.error(e instanceof Error ? e.message : 'Export mapy selhal')
     } finally {
       setTileBusy(false)
       setTileProgress('')
@@ -2108,6 +2403,52 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
               Tažením maluješ přes víc dlaždic; tah, co začne na vybrané, naopak odebírá.
               <span className="text-gray-400"> Mapu tady posouváš pravým tlačítkem, zoom kolečkem.</span>
             </div>
+            <button
+              onClick={() => setGridOn(g => !g)}
+              className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${gridOn ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+            >
+              {gridOn ? <Eye size={13} /> : <EyeOff size={13} />} Mřížka s názvy
+            </button>
+            {gridOn && (
+              <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
+                {gridNote || `Názvy odpovídají „dlazdice_<X>_<Y>" v exportu.`}
+              </div>
+            )}
+            <button
+              onClick={() => setExportKatastr(v => !v)}
+              title="Přibalit do zipu i hranice parcel (katastr) jako DXF křivky"
+              className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${exportKatastr ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+            >
+              {exportKatastr ? <Check size={13} /> : <Layers size={13} />} Přidat katastr (DXF)
+            </button>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-500 w-11 shrink-0" title="Strop rozlišení spojené 2D mapy">Mapa px</span>
+              {[8192, 12288, 16384].map(s => (
+                <button
+                  key={s}
+                  onClick={() => setStitchMax(s)}
+                  title={s === 16384 ? 'Nejostřejší, ale ~1 GB paměti — u velkých oblastí může spadnout' : undefined}
+                  className={`px-1.5 py-0.5 rounded text-[11px] ${stitchMax === s ? 'bg-teal-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                >{s / 1024}k</button>
+              ))}
+            </div>
+            {tileCount > 0 && (() => {
+              // odhad rozlišení spojené mapy pro aktuální výběr (nativní 20 cm/px, zastropováno)
+              let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity
+              for (const t of tilesRef.current.values()) { ix0 = Math.min(ix0, t.tile.ix); ix1 = Math.max(ix1, t.tile.ix); iy0 = Math.min(iy0, t.tile.iy); iy1 = Math.max(iy1, t.tile.iy) }
+              const spanX = (ix1 - ix0 + 1) * tileSize, spanY = (iy1 - iy0 + 1) * tileSize
+              const nW = spanX / 0.2, nH = spanY / 0.2
+              let sc = Math.min(1, stitchMax / Math.max(nW, nH))
+              if (nW * sc * nH * sc > 16384 * 16384) sc = Math.sqrt(16384 * 16384 / (nW * nH))
+              const cmpx = 0.2 / sc * 100
+              const W = Math.round(nW * sc), H = Math.round(nH * sc)
+              return (
+                <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
+                  Ortofoto: {W}×{H} px · {cmpx.toFixed(0)} cm/px{sc >= 1 ? ' (nativní)' : ''}<br />
+                  <span className="text-gray-600">topo jen orientační podklad (menší)</span>
+                </div>
+              )
+            })()}
             <div className="flex items-center gap-1">
               <span className="text-[10px] text-gray-500 w-11 shrink-0">Dlaždice</span>
               {TILE_SIZES.map(s => (
@@ -2191,6 +2532,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
             className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs disabled:opacity-50"
           >
             {tileBusy ? <><Loader2 size={13} className="animate-spin" /> {tileProgress}</> : <><Download size={13} /> Terén + ortofoto (OBJ)</>}
+          </button>
+          <button
+            onClick={exportStitchedMaps}
+            disabled={tileBusy}
+            title="Spojená 2D mapa přes výběr — ortofoto i topografická mapa jako jeden georeferencovaný obrázek (world file)"
+            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs disabled:opacity-50"
+          >
+            {tileBusy ? <><Loader2 size={13} className="animate-spin" /> {tileProgress}</> : <><Image size={13} /> Spojená mapa (2D)</>}
           </button>
           <button onClick={clearTiles} title="Zrušit výběr dlaždic" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
             <Trash2 size={14} />
