@@ -4,7 +4,6 @@ import 'cesium/Build/Cesium/Widgets/widgets.css'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
-import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
@@ -12,17 +11,21 @@ import { Zip, ZipDeflate, ZipPassThrough, zipSync, strToU8 } from 'three/example
 import {
   TILE_SIZES, MESH_STEPS, MESH_STEP_DEFAULT, TEX_SIZES, type TileSize, type MeshStep, type TexSize,
   type Tile, type Offset, tileKey, tileName, tileAt, tilesBounds, tileRingLL, wgsOf, sjtskOf,
-  pool, fetchTileHeights, fetchTileOrtho, buildTileObj, buildMtl, buildMaxScript, medianHeight,
+  pool, fetchTileHeights, fetchTileOrtho, fetchRetry, fetchJpegRetry, buildTileObj, buildMtl, buildMaxScript, buildMaxScriptFiles, medianHeight,
   gridSize, stepOf, concatBytes, estimateObjBytes, mapBboxUrl, pickTopoTier, type MapLayer,
 } from './tiles'
+import { cacheGet, cachePut, cacheStats, cacheClear } from './cache'
 import proj4 from 'proj4'
 import { fromArrayBuffer } from 'geotiff'
 import cdt2d from 'cdt2d'
 import polygonClipping from 'polygon-clipping'
 import { toast } from 'sonner'
-import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload, Move, Crosshair, Trash2, ArrowDownToLine, RotateCcw, MapPin, Mountain, Download, Eye, EyeOff, Hexagon, Check, Sparkles, Grid3x3 } from 'lucide-react'
+import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload, Move, Crosshair, Trash2, ArrowDownToLine, RotateCcw, MapPin, Mountain, Download, Eye, EyeOff, Hexagon, Check, Sparkles, Grid3x3, X } from 'lucide-react'
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined
+
+// Zrušený export: fetch(...,{signal}) i naše ruční `throw` házejí DOMException s name 'AbortError'.
+const isAbortError = (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
 
 // ── Přepínače funkcí (skrýt, ne mazat) ─────────────────────────────────────────────
 // Pro nasazení v task-manageru nepotřebujeme Google 3D, OSM budovy ani městské části Liberce.
@@ -138,6 +141,14 @@ function makeDmrTerrain(): Cesium.CustomHeightmapTerrainProvider {
       const key = `${level}/${x}/${y}`
       const cached = dmrTileCache.get(key)
       if (cached) return cached
+      // trvalá cache (disk) — přežije refresh; klíč odlišený od exportních dlaždic (jiné dláždění + GEOID)
+      const dbKey = `dmrterr/${level}/${x}/${y}`
+      const disk = await cacheGet(dbKey)
+      if (disk && disk.byteLength === W * H * 4) {
+        const out = new Float32Array(disk.slice().buffer)
+        dmrTileCache.set(key, out)
+        return out
+      }
       await dmrAcquire()
       try {
         const hit = dmrTileCache.get(key) // mezitím mohla dorazit
@@ -152,6 +163,7 @@ function makeDmrTerrain(): Cesium.CustomHeightmapTerrainProvider {
         }
         if (dmrTileCache.size >= DMR_CACHE_MAX) dmrTileCache.delete(dmrTileCache.keys().next().value as string)
         dmrTileCache.set(key, out)
+        void cachePut(dbKey, new Uint8Array(out.buffer.slice(0)))
         return out
       } catch {
         return flat
@@ -170,8 +182,6 @@ type Placement = { lon: number; lat: number; groundH: number; heightOffset: numb
 type GroundHit = { lon: number; lat: number; height: number }
 type Parcel = { id: string; positions: Cesium.Cartesian3[] }
 type Anchor = { lon: number; lat: number; h: number }
-// data DMR výseku pro export (ECEF vrcholy + indexy + geo-kotva + obrys parcely pro budovy)
-type DmrData = { positions: number[]; indices: number[]; anchor: Anchor; ring: number[][]; holes?: number[][][] }
 
 // jeden importovaný model ve scéně
 type ModelEntry = {
@@ -188,7 +198,7 @@ type ModelEntry = {
   excavate?: boolean                // vyhloubit pod ním terén, ať je vidět zapuštěná část
 }
 // položka panelu Scéna
-type SceneObj = { id: string; kind: 'model' | 'parcel' | 'surface' | 'dmr'; name: string; visible: boolean }
+type SceneObj = { id: string; kind: 'model' | 'parcel' | 'surface'; name: string; visible: boolean }
 
 /**
  * Geo-kotva v názvu jako CELÁ ČÍSLA bez teček (lon/lat v mikrostupních, výška v cm) —
@@ -204,93 +214,6 @@ function download(data: BlobPart, filename: string, mime: string) {
   const a = document.createElement('a')
   a.href = url; a.download = filename; a.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
-function makeGeom(positions: number[], indices: number[]): THREE.BufferGeometry {
-  const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  const vcount = positions.length / 3
-  g.setIndex(vcount < 65536 ? new THREE.Uint16BufferAttribute(indices, 1) : new THREE.Uint32BufferAttribute(indices, 1))
-  g.computeVertexNormals()
-  return g
-}
-
-/**
- * Export scény pro víc výseků v lokálním ENU rámci kolem kotvy prvního výseku (gltf Y-up: E, U, -N).
- * Vrací TERÉN a BUDOVY jako oddělené geometrie (dva objekty v souboru). Budovy z OSM (Overpass).
- */
-async function buildExportScene(patches: DmrData[], withBuildings: boolean): Promise<{ terrain: THREE.BufferGeometry; buildings: THREE.BufferGeometry | null; anchor: Anchor }> {
-  const anchor = patches[0].anchor
-  const anchorECEF = Cesium.Cartesian3.fromDegrees(anchor.lon, anchor.lat, anchor.h)
-  const inv = Cesium.Matrix4.inverseTransformation(Cesium.Transforms.eastNorthUpToFixedFrame(anchorECEF), new Cesium.Matrix4())
-  const s = new Cesium.Cartesian3(), o = new Cesium.Cartesian3()
-  const local = (x: number, y: number, z: number): [number, number, number] => { s.x = x; s.y = y; s.z = z; Cesium.Matrix4.multiplyByPoint(inv, s, o); return [o.x, o.z, -o.y] }
-  const enu2 = (x: number, y: number, z: number): [number, number] => { s.x = x; s.y = y; s.z = z; Cesium.Matrix4.multiplyByPoint(inv, s, o); return [o.x, o.y] }
-
-  // ── TERÉN (všechny výseky) ──
-  const tPos: number[] = [], tIdx: number[] = []
-  for (const data of patches) {
-    const t0 = tPos.length / 3
-    const n = data.positions.length / 3
-    for (let i = 0; i < n; i++) { const [a, b, c] = local(data.positions[i * 3], data.positions[i * 3 + 1], data.positions[i * 3 + 2]); tPos.push(a, b, c) }
-    for (const idx of data.indices) tIdx.push(t0 + idx)
-  }
-  const terrain = makeGeom(tPos, tIdx)
-
-  // ── BUDOVY (OSM, všechny výseky) — zvlášť ──
-  let buildings: THREE.BufferGeometry | null = null
-  if (withBuildings) {
-    const bPos: number[] = [], bIdx: number[] = []
-    const pushLocal = (x: number, y: number, z: number): number => { const [a, b, c] = local(x, y, z); const i = bPos.length / 3; bPos.push(a, b, c); return i }
-    // OSM per parcela (malý bbox = rychlý dotaz, žádný 504); sekvenčně s retry/mirrory kvůli 429
-    for (const data of patches) {
-      if (data.ring.length < 3) continue
-      let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity
-      for (const [lon, lat] of data.ring) { minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon); minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat) }
-      try {
-        const [bldgs, dmr, dmp] = await Promise.all([
-          fetchOsmBuildingsTiled(minLon, minLat, maxLon, maxLat),
-          fetchElevSampler('dmr5g', minLon, minLat, maxLon, maxLat, 1024),
-          fetchElevSampler('dmp1g', minLon, minLat, maxLon, maxLat, 1024),
-        ])
-        for (const bld of bldgs) {
-          const [cx, cy] = ringCentroid(bld.ring)
-          if (!pointInRing(cx, cy, data.ring)) continue
-          if (data.holes?.some(h => pointInRing(cx, cy, h))) continue
-          const r = bld.ring.slice()
-          if (r.length > 1) { const a = r[0], b = r[r.length - 1]; if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) r.pop() }
-          if (r.length < 3) continue
-          let baseH = Infinity
-          for (const [lon, lat] of r) { const d = dmr(lon, lat); if (d != null) baseH = Math.min(baseH, d) }
-          if (!Number.isFinite(baseH)) continue
-          const bEll = baseH + GEOID_CZ
-          let tEll: number
-          if (bld.height != null) tEll = bEll + bld.height
-          else { let topH = -Infinity; for (const [lon, lat] of r) { const sp = dmp(lon, lat); if (sp != null) topH = Math.max(topH, sp) }; if (!Number.isFinite(topH)) continue; tEll = topH + GEOID_CZ }
-          if (tEll - bEll < 2) continue
-          const nb = r.length
-          const baseIdx: number[] = [], topIdx: number[] = [], footprint: number[][] = []
-          for (const [lon, lat] of r) {
-            const pb = Cesium.Cartesian3.fromDegrees(lon, lat, bEll)
-            const pt = Cesium.Cartesian3.fromDegrees(lon, lat, tEll)
-            footprint.push(enu2(pb.x, pb.y, pb.z))
-            baseIdx.push(pushLocal(pb.x, pb.y, pb.z))
-            topIdx.push(pushLocal(pt.x, pt.y, pt.z))
-          }
-          for (let i = 0; i < nb; i++) { const j = (i + 1) % nb; bIdx.push(baseIdx[i], baseIdx[j], topIdx[j], baseIdx[i], topIdx[j], topIdx[i]) }
-          const loop: number[][] = []
-          for (let i = 0; i < nb; i++) loop.push([i, (i + 1) % nb])
-          for (const [a, b, c] of cdt2d(footprint, loop, { exterior: false })) {
-            bIdx.push(topIdx[a], topIdx[b], topIdx[c])
-            bIdx.push(baseIdx[a], baseIdx[c], baseIdx[b])
-          }
-        }
-      } catch (e) { console.error('Budovy do exportu selhaly:', e) }
-    }
-    if (bPos.length) buildings = makeGeom(bPos, bIdx)
-  }
-
-  return { terrain, buildings, anchor }
 }
 
 function anchorFilename(anchor: Anchor, ext: string): string {
@@ -320,90 +243,44 @@ function buildDxf(polylines: [number, number, number][][]): string {
   return L.join('\n')
 }
 
-type OsmBuilding = { ring: number[][]; height: number | null }
-
-/** Půdorysy budov z OpenStreetMap (Overpass API) pro bbox — WGS84, + výška z tagů (matchuje zobrazené OSM budovy). */
-async function fetchOsmBuildings(minLon: number, minLat: number, maxLon: number, maxLat: number): Promise<OsmBuilding[]> {
-  const bbox = `${minLat},${minLon},${maxLat},${maxLon}`
-  const q = `[out:json][timeout:25];(way["building"](${bbox});relation["building"](${bbox}););out geom tags;`
-  // víc mirrorů; některé občas úplně visí (žádná odpověď) → viz AbortController timeout níž.
-  // Pozn: NEpoužívat regionální instance (např. overpass.osm.ch = jen Švýcarsko) — vrátí 200 s 0 budovami!
-  const endpoints = [
-    'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://overpass.private.coffee/api/interpreter',
-  ]
-  const out: OsmBuilding[] = []
-  type Node = { lat: number; lon: number }
-  type El = { type: string; geometry?: Node[]; members?: { role: string; geometry?: Node[] }[]; tags?: Record<string, string> }
-  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
-  const REQ_TIMEOUT = 12000 // některé mirrory neodpoví vůbec → nezamrznout, po 12 s zkusit další
-  for (let attempt = 0; attempt < endpoints.length * 2; attempt++) {
-    try {
-      const ctrl = new AbortController()
-      const timer = setTimeout(() => ctrl.abort(), REQ_TIMEOUT)
-      let res: Response
-      try { res = await fetch(endpoints[attempt % endpoints.length] + '?data=' + encodeURIComponent(q), { signal: ctrl.signal }) }
-      finally { clearTimeout(timer) }
-      if (res.status === 429 || res.status === 504 || res.status >= 500) { await sleep(600 * (attempt + 1)); continue } // rate-limit/timeout → hned jiný mirror
-      if (!res.ok) { await sleep(400); continue }
-      const data = await res.json() as { elements?: El[] }
-      for (const el of data.elements ?? []) {
-        let geom: Node[] | undefined
-        if (el.type === 'way') geom = el.geometry
-        else if (el.type === 'relation') geom = el.members?.find(m => m.role === 'outer' && m.geometry)?.geometry
-        if (!geom || geom.length < 3) continue
-        const tags = el.tags ?? {}
-        let height: number | null = null
-        if (tags.height) height = parseFloat(tags.height)
-        else if (tags['building:levels']) height = parseFloat(tags['building:levels']) * 3
-        if (!Number.isFinite(height as number)) height = null
-        out.push({ ring: geom.map(g => [g.lon, g.lat]), height })
-      }
-      return out
-    } catch { await sleep(1000) }
-  }
-  return out
-}
-
-/** Overpass pro velký bbox rozdělený na dlaždice — velký bbox vrací 504 (Gateway Timeout).
- *  Sekvenčně po ~600 m dlaždicích (retry/mirrory řeší fetchOsmBuildings), dedup podle geometrie. */
-async function fetchOsmBuildingsTiled(minLon: number, minLat: number, maxLon: number, maxLat: number): Promise<OsmBuilding[]> {
-  const MAX_SPAN = 0.008 // ~600 m; větší dotaz Overpass často odmítne
-  const nx = Math.max(1, Math.ceil((maxLon - minLon) / MAX_SPAN))
-  const ny = Math.max(1, Math.ceil((maxLat - minLat) / MAX_SPAN))
-  const dx = (maxLon - minLon) / nx, dy = (maxLat - minLat) / ny
-  const out: OsmBuilding[] = []
-  const seen = new Set<string>()
-  for (let iy = 0; iy < ny; iy++) {
-    for (let ix = 0; ix < nx; ix++) {
-      const a = minLon + ix * dx, b = minLat + iy * dy
-      const cells = await fetchOsmBuildings(a, b, a + dx, b + dy)
-      for (const c of cells) {
-        const [cx, cy] = ringCentroid(c.ring) // budova u hrany dlaždice se vrátí ve dvou → dedup podle těžiště
-        const key = `${cx.toFixed(6)},${cy.toFixed(6)}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        out.push(c)
-      }
-    }
-  }
-  return out
-}
-
 /** Výškový rastr z ČÚZK ImageServeru (dmr5g/dmp1g) → vzorkovací funkce lon/lat → výška (Bpv). */
 async function fetchElevSampler(service: 'dmr5g' | 'dmp1g', minLon: number, minLat: number, maxLon: number, maxLat: number, size: number): Promise<(lon: number, lat: number) => number | null> {
   const url = `https://ags.cuzk.gov.cz/arcgis2/rest/services/${service}/ImageServer/exportImage?bbox=${minLon},${minLat},${maxLon},${maxLat}&bboxSR=4326&imageSR=4326&size=${size},${size}&format=tiff&pixelType=F32&f=image`
-  const img = await (await fromArrayBuffer(await (await fetch(url)).arrayBuffer())).getImage()
-  const w = img.getWidth(), h = img.getHeight()
-  const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
-  return (lon, lat) => {
-    const x = Math.max(0, Math.min(w - 1, Math.round(((lon - minLon) / (maxLon - minLon)) * w - 0.5)))
-    const y = Math.max(0, Math.min(h - 1, Math.round(((maxLat - lat) / (maxLat - minLat)) * h - 0.5)))
-    const e = r[y * w + x] as number
-    return Number.isFinite(e) && e > -500 && e < 3000 ? e : null
-  }
+  return fetchRetry(url, { parse: async res => {
+    if (!res.ok) throw new Error(`${service}: HTTP ${res.status}`)
+    const img = await (await fromArrayBuffer(await res.arrayBuffer())).getImage()
+    const w = img.getWidth(), h = img.getHeight()
+    if (!w || !h) throw new Error(`${service}: prázdný rastr`)
+    const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
+    return (lon, lat) => {
+      const x = Math.max(0, Math.min(w - 1, Math.round(((lon - minLon) / (maxLon - minLon)) * w - 0.5)))
+      const y = Math.max(0, Math.min(h - 1, Math.round(((maxLat - lat) / (maxLat - minLat)) * h - 0.5)))
+      const e = r[y * w + x] as number
+      return Number.isFinite(e) && e > -500 && e < 3000 ? e : null
+    }
+  } })
+}
+
+/**
+ * Totéž, ale rovnou v S-JTSK (EPSG:5514) → vzorkovač (X,Y)→výška Bpv. Používá výřez katastru,
+ * který trianguluje v S-JTSK rovině (stejně jako dlaždice), takže výšky vzorkuje bez reprojekce.
+ * Výšky jsou syrové Bpv (BEZ geoidu) — shodně s dlaždicemi (fetchTileHeights), ať export lícuje.
+ */
+async function fetchElevSamplerSJTSK(minX: number, minY: number, maxX: number, maxY: number, sw: number, sh: number, signal?: AbortSignal): Promise<(x: number, y: number) => number | null> {
+  const url = `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer/exportImage?bbox=${minX},${minY},${maxX},${maxY}&bboxSR=5514&imageSR=5514&size=${sw},${sh}&format=tiff&pixelType=F32&f=image`
+  return fetchRetry(url, { signal, parse: async res => {
+    if (!res.ok) throw new Error(`DMR 5G: HTTP ${res.status}`)
+    const img = await (await fromArrayBuffer(await res.arrayBuffer())).getImage()
+    const w = img.getWidth(), h = img.getHeight()
+    if (!w || !h) throw new Error('DMR 5G: prázdný rastr')
+    const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
+    return (x, y) => {
+      const px = Math.max(0, Math.min(w - 1, Math.round(((x - minX) / (maxX - minX)) * w - 0.5)))
+      const py = Math.max(0, Math.min(h - 1, Math.round(((maxY - y) / (maxY - minY)) * h - 0.5)))
+      const e = r[py * w + px] as number
+      return Number.isFinite(e) && e > -500 && e < 3000 ? e : null
+    }
+  } })
 }
 
 /** Najde 3D bod povrchu (terén/dlaždice) pod daným bodem obrazovky. */
@@ -760,9 +637,8 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const osmRef = useRef<Cesium.Cesium3DTileset | null>(null)
   const modelsRef = useRef<Map<string, ModelEntry>>(new Map())
   const selectedIdRef = useRef<string | null>(null)
-  // multi-parcela: vybrané parcely + jejich hotové DMR výseky (klíč = id parcely)
+  // multi-parcela: vybrané parcely (klíč = id parcely)
   const parcelsRef = useRef<Map<string, { positions: Cesium.Cartesian3[]; ring: number[][]; ents: Cesium.Entity[] }>>(new Map())
-  const patchesRef = useRef<Map<string, { data: DmrData; prim: Cesium.Primitive }>>(new Map())
   const fileRef = useRef<HTMLInputElement>(null)
 
   const [base, setBase] = useState<Base>('ortofoto')
@@ -788,6 +664,9 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const [parcelMode, setParcelMode] = useState(false)
   const [parcelLoading, setParcelLoading] = useState(false)
   const [parcelCount, setParcelCount] = useState(0)
+  const [cutoutBusy, setCutoutBusy] = useState(false)      // export výřezu (terén+ortofoto) běží
+  const [cutoutPct, setCutoutPct] = useState(-1)           // 0..1 určitý průběh, -1 = neurčitý
+  const [cutoutProgress, setCutoutProgress] = useState('') // textový popis fáze
   // výběr oblasti: naklikat body → vybrat všechny parcely uvnitř polygonu
   const [areaMode, setAreaMode] = useState(false)
   const [areaPtCount, setAreaPtCount] = useState(0)
@@ -804,6 +683,8 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const [tileCount, setTileCount] = useState(0)
   const [tileBusy, setTileBusy] = useState(false)
   const [tileProgress, setTileProgress] = useState('')
+  const [tilePct, setTilePct] = useState(-1) // 0..1 = určitý průběh (stahování), -1 = neurčitý (skládání apod.)
+  const abortRef = useRef<AbortController | null>(null) // pro zrušení běžícího exportu
   const tilesRef = useRef<Map<string, { tile: Tile; ent: Cesium.Entity }>>(new Map())
   // mřížka dlaždic přes viditelnou oblast (jako kladení listů na ČÚZK) — zap/vyp overlay s názvy
   const [gridOn, setGridOn] = useState(false)
@@ -811,9 +692,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const gridEntsRef = useRef<Cesium.Entity[]>([])
   // přibalit do exportu i hranice parcel (katastr) jako DXF křivky
   const [exportKatastr, setExportKatastr] = useState(false)
-  // detailní DMR-5G výseky
-  const [dmrLoading, setDmrLoading] = useState(false)
-  const [patchCount, setPatchCount] = useState(0)
+  // trvalá cache dlaždic (IndexedDB) — stav pro UI
+  const [cacheInfo, setCacheInfo] = useState<{ count: number; bytes: number }>({ count: 0, bytes: 0 })
+  const refreshCache = () => { cacheStats().then(setCacheInfo).catch(() => {}) }
+  useEffect(() => { refreshCache(); const id = setInterval(refreshCache, 4000); return () => clearInterval(id) }, [])
   const [exporting, setExporting] = useState(false)
   // OSM budovy (globální šedé bloky přes ion) — spolehlivé pokrytí
   const [osmOn, setOsmOn] = useState(false)
@@ -1413,15 +1295,21 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   async function exportTilesObj() {
     const tiles = [...tilesRef.current.values()].map(t => t.tile)
     if (!tiles.length || tileBusy) return
+    const ac = new AbortController()
+    abortRef.current = ac
     setTileBusy(true)
+    setTilePct(0)
     setTileProgress(`0/${tiles.length}`)
     try {
       let done = 0
       const fetched = await pool(tiles, 3, async tile => {
-        const [grid, jpg] = await Promise.all([fetchTileHeights(tile, meshStep), fetchTileOrtho(tile, texSize)])
-        setTileProgress(`${++done}/${tiles.length}`)
+        const [grid, jpg] = await Promise.all([fetchTileHeights(tile, meshStep, ac.signal), fetchTileOrtho(tile, texSize, ac.signal)])
+        done++
+        setTilePct(done / tiles.length)
+        setTileProgress(`${done}/${tiles.length}`)
         return { tile, grid, jpg }
       })
+      setTilePct(-1)
       setTileProgress('skládám…')
       await new Promise(r => setTimeout(r, 30)) // ať se stihne překreslit UI před blokující prací
 
@@ -1444,10 +1332,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       let vBase = 1
       let built = 0
       for (const f of fetched) {
+        if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
         objF.push(strToU8(buildTileObj(f.tile, f.grid, off, fallbackH, vBase) + '\n'), false)
         vBase += f.grid.n * f.grid.n
         check()
         if (++built % 5 === 0 || built === fetched.length) {
+          setTilePct(built / fetched.length)
           setTileProgress(`skládám ${built}/${fetched.length}`)
           await new Promise(r => setTimeout(r, 0)) // pustit UI k slovu
         }
@@ -1474,12 +1364,17 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       // volitelně: hranice parcel (katastr) jako DXF křivky v témže S-JTSK rámci
       let katastrLine = 'Katastr: ne'
       if (exportKatastr) {
+        setTilePct(-1)
         setTileProgress('katastr…')
         try {
           const k = await fetchKatastrDxf(minX, minY, maxX, maxY)
+          if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
           if (k) { addText('katastr.dxf', k.dxf); katastrLine = `Katastr: katastr.dxf (${k.count} parcel, hranice jako 3D křivky)` }
           else katastrLine = 'Katastr: v oblasti nenalezeny žádné parcely'
-        } catch (e) { console.error('Katastr do exportu selhal:', e); katastrLine = 'Katastr: stažení selhalo (viz konzole)' }
+        } catch (e) {
+          if (isAbortError(e)) throw e
+          console.error('Katastr do exportu selhal:', e); katastrLine = 'Katastr: stažení selhalo (viz konzole)'
+        }
       }
 
       addText('info.txt', [
@@ -1515,11 +1410,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       download(concatBytes(chunks), `teren_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
       toast.success(`Vyvezeno ${tiles.length}× dlaždice ${tileSize} m s ortofotem`)
     } catch (e) {
+      if (isAbortError(e)) { toast.info('Export zrušen'); return }
       console.error('Export dlaždic selhal:', e)
       toast.error(e instanceof Error ? e.message : 'Export dlaždic selhal')
     } finally {
+      abortRef.current = null
       setTileBusy(false)
       setTileProgress('')
+      setTilePct(-1)
     }
   }
 
@@ -1537,13 +1435,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
    * detekci nepoužitelná (chyba mívá i 3 MB, reálný list i 10 kB), spolehlivé je jen to, že prázdná
    * mapa je JEDNOLITÁ plocha → zmenšíme na 16×16 a změříme rozptyl. Reálná mapa má obrovský.
    */
-  async function loadMapChunk(url: string): Promise<ImageBitmap> {
+  async function loadMapChunk(url: string, signal?: AbortSignal): Promise<ImageBitmap> {
     const probe = document.createElement('canvas'); probe.width = 16; probe.height = 16
     const pctx = probe.getContext('2d', { willReadFrequently: true })
     let lastErr: unknown = null
     for (let attempt = 1; attempt <= 4; attempt++) {
+      if (signal?.aborted) throw new DOMException('Zrušeno', 'AbortError')
       try {
-        const res = await fetch(url)
+        const res = await fetch(url, { signal })
         const ct = res.headers.get('content-type') || ''
         if (!res.ok || !ct.startsWith('image/')) throw new Error(`HTTP ${res.status} (${ct || 'bez typu'})`)
         const bmp = await createImageBitmap(await res.blob())
@@ -1557,6 +1456,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         }
         return bmp
       } catch (e) {
+        if (isAbortError(e) || signal?.aborted) throw e // uživatel zrušil → nezkoušet znovu
         lastErr = e
         if (attempt < 4) await new Promise(r => setTimeout(r, 500 * attempt)) // narůstající pauza
       }
@@ -1567,7 +1467,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   async function exportStitchedMaps() {
     const tiles = [...tilesRef.current.values()].map(t => t.tile)
     if (!tiles.length || tileBusy) return
+    const ac = new AbortController()
+    abortRef.current = ac
     setTileBusy(true)
+    setTilePct(0)
     setTileProgress('mapa…')
     try {
       // S-JTSK obálka výběru (dlaždice jsou souvislé čtverce)
@@ -1621,8 +1524,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
           // blok v S-JTSK (pixelové hranice → poměrná část obálky); sever = horní okraj
           const bx0 = minX + spanX * cx[c] / W, bx1 = minX + spanX * cx[c + 1] / W
           const by1 = maxY - spanY * cy[r] / H, by0 = maxY - spanY * cy[r + 1] / H
-          const bmp = await loadMapChunk(mapBboxUrl(bx0, by0, bx1, by1, pxW, pxH, L.layer, tier))
-          setTileProgress(`mapa ${++done}/${total}`)
+          const bmp = await loadMapChunk(mapBboxUrl(bx0, by0, bx1, by1, pxW, pxH, L.layer, tier), ac.signal)
+          done++
+          setTilePct(done / total)
+          setTileProgress(`mapa ${done}/${total}`)
           return { c, r, bmp, pxW, pxH }
         })
         for (const { c, r, bmp, pxW, pxH } of imgs) { ctx.drawImage(bmp, cx[c], cy[r], pxW, pxH); bmp.close?.() }
@@ -1654,11 +1559,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       download(zipped, `mapa_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
       toast.success(`Spojená mapa: ortofoto ${o.W}×${o.H} px + topo ${tp.W}×${tp.H} px`)
     } catch (e) {
+      if (isAbortError(e)) { toast.info('Export zrušen'); return }
       console.error('Export spojené mapy selhal:', e)
       toast.error(e instanceof Error ? e.message : 'Export mapy selhal')
     } finally {
+      abortRef.current = null
       setTileBusy(false)
       setTileProgress('')
+      setTilePct(-1)
     }
   }
 
@@ -1815,77 +1723,11 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     if (p && v && !v.isDestroyed()) p.ents.forEach(e => v.entities.remove(e))
     parcelsRef.current.delete(pid)
     removeObj(`parcel-${pid}`)
-    // detailní terén je union přes všechny parcely → jakákoli změna výběru ho zneplatní
-    if (patchesRef.current.size) removeAllPatches()
     setParcelCount(parcelsRef.current.size)
   }
 
   function clearAllParcels() {
     for (const pid of [...parcelsRef.current.keys()]) removeParcel(pid)
-  }
-
-  function removePatch(pid: string) {
-    const v = viewerRef.current
-    const pt = patchesRef.current.get(pid)
-    if (pt && v && !v.isDestroyed()) v.scene.primitives.remove(pt.prim)
-    patchesRef.current.delete(pid)
-    removeObj(`dmr-${pid}`)
-    setPatchCount(patchesRef.current.size)
-  }
-
-  function removeAllPatches() {
-    for (const pid of [...patchesRef.current.keys()]) removePatch(pid)
-  }
-
-
-  // sesbírá všechny hotové výseky (multi-parcela)
-  function collectPatches(): DmrData[] {
-    return [...patchesRef.current.values()].map(p => p.data)
-  }
-
-  // export všech výseků (+ OSM budovy) — terén a budovy jako ODDĚLENÉ objekty; reimport na stejné místo
-  async function exportDmrGlb() {
-    const patches = collectPatches()
-    if (!patches.length || exporting) { return }
-    setExporting(true)
-    try {
-      const { terrain, buildings, anchor } = await buildExportScene(patches, true)
-      const scene = new THREE.Scene()
-      const tm = new THREE.Mesh(terrain, new THREE.MeshStandardMaterial({ color: 0xb8a888, side: THREE.DoubleSide, roughness: 1 })); tm.name = 'teren'; scene.add(tm)
-      if (buildings) { const bm = new THREE.Mesh(buildings, new THREE.MeshStandardMaterial({ color: 0xd0d0d0 })); bm.name = 'budovy'; scene.add(bm) }
-      scene.userData = { geoAnchor: anchor }
-      await new Promise<void>((resolve) => {
-        new GLTFExporter().parse(
-          scene,
-          res => { download(res as ArrayBuffer, anchorFilename(anchor, 'glb'), 'model/gltf-binary'); resolve() },
-          err => { console.error('GLTF export selhal', err); resolve() },
-          { binary: true },
-        )
-      })
-    } catch (e) {
-      console.error('Export glb selhal:', e)
-    } finally {
-      setExporting(false)
-    }
-  }
-
-  async function exportDmrObj() {
-    const patches = collectPatches()
-    if (!patches.length || exporting) { return }
-    setExporting(true)
-    try {
-      const { terrain, buildings, anchor } = await buildExportScene(patches, true)
-      terrain.rotateX(Math.PI / 2) // gltf Y-up → Z-up (3ds Max), ať model přijde upright
-      if (buildings) buildings.rotateX(Math.PI / 2)
-      const scene = new THREE.Scene()
-      const tm = new THREE.Mesh(terrain, new THREE.MeshStandardMaterial({ color: 0xb8a888 })); tm.name = 'teren'; scene.add(tm)
-      if (buildings) { const bm = new THREE.Mesh(buildings, new THREE.MeshStandardMaterial({ color: 0xd0d0d0 })); bm.name = 'budovy'; scene.add(bm) }
-      download(new OBJExporter().parse(scene), anchorFilename(anchor, 'obj'), 'text/plain')
-    } catch (e) {
-      console.error('Export obj selhal:', e)
-    } finally {
-      setExporting(false)
-    }
   }
 
   // export hranic vybraných parcel jako uzavřené 3D křivky (DXF pro 3ds Max), drapované na DMR.
@@ -1895,17 +1737,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     if (!v || v.isDestroyed() || parcelsRef.current.size === 0 || exporting) return
     setExporting(true)
     try {
-      // kotva: shodná s terénem, ať křivky sedí; jinak dopočítat ze středu bboxu parcel
-      let anchor = collectPatches()[0]?.anchor
-      if (!anchor) {
-        let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity
-        for (const p of parcelsRef.current.values())
-          for (const [lo, la] of p.ring) { minLon = Math.min(minLon, lo); maxLon = Math.max(maxLon, lo); minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la) }
-        const midLon = (minLon + maxLon) / 2, midLat = (minLat + maxLat) / 2
-        const cc = [Cesium.Cartographic.fromDegrees(midLon, midLat)]
-        await Cesium.sampleTerrain(v.terrainProvider, 18, cc)
-        anchor = { lon: midLon, lat: midLat, h: Number.isFinite(cc[0].height) ? cc[0].height : 0 }
-      }
+      // kotva ze středu bboxu vybraných parcel
+      let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity
+      for (const p of parcelsRef.current.values())
+        for (const [lo, la] of p.ring) { minLon = Math.min(minLon, lo); maxLon = Math.max(maxLon, lo); minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la) }
+      const midLon = (minLon + maxLon) / 2, midLat = (minLat + maxLat) / 2
+      const cc = [Cesium.Cartographic.fromDegrees(midLon, midLat)]
+      await Cesium.sampleTerrain(v.terrainProvider, 18, cc)
+      const anchor = { lon: midLon, lat: midLat, h: Number.isFinite(cc[0].height) ? cc[0].height : 0 }
       const anchorECEF = Cesium.Cartesian3.fromDegrees(anchor.lon, anchor.lat, anchor.h)
       const inv = Cesium.Matrix4.inverseTransformation(Cesium.Transforms.eastNorthUpToFixedFrame(anchorECEF), new Cesium.Matrix4())
       const s = new Cesium.Cartesian3(), o = new Cesium.Cartesian3()
@@ -1937,127 +1776,22 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }
   }
 
-  // spočítá triangulovaný DMR mesh pro polygon (vnější obrys + díry), ořezaný přesně hranicí.
-  // outer/holes ve WGS84 [lon,lat]. Vrací data pro export; Cesium primitiv se vyrábí zvlášť.
-  async function computePatchData(outer: number[][], holes: number[][][]): Promise<DmrData | null> {
-    const v = viewerRef.current
-    if (!v || v.isDestroyed() || outer.length < 3) return null
-
-    // odstraň duplicitní uzavírací bod ringu
-    const cleanRing = (r: number[][]) => {
-      const c = r.slice()
-      if (c.length > 1) { const a0 = c[0], aN = c[c.length - 1]; if (Math.abs(a0[0] - aN[0]) < 1e-9 && Math.abs(a0[1] - aN[1]) < 1e-9) c.pop() }
-      return c
-    }
-    const clean = cleanRing(outer)
-    const cleanHoles = holes.map(cleanRing).filter(h => h.length >= 3)
-    if (clean.length < 3) return null
-
-    // bbox z vnějšího obrysu
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity
-    for (const [lon, lat] of clean) { minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon); minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat) }
-    const midLat = (minLat + maxLat) / 2, midLon = (minLon + maxLon) / 2
-    const wM = (maxLon - minLon) * 111320 * Math.cos(midLat * Math.PI / 180)
-    const hM = (maxLat - minLat) * 111320
-    const cosLat = Math.cos(midLat * Math.PI / 180)
-    const toLocal = (lon: number, lat: number): [number, number] => [(lon - midLon) * 111320 * cosLat, (lat - midLat) * 111320]
-
-    // rozteč ~ tak, aby bylo max ~100 bodů na delší stranu (vzorkování výšky je per-bod)
-    const spacingM = Math.max(3, Math.max(wM, hM) / 100)
-
-    // body + constrained hrany: vnější obrys i každá díra jako zhuštěná uzavřená smyčka
-    const ll: number[][] = []
-    const edges: number[][] = []
-    const addLoop = (r: number[][]) => {
-      const start = ll.length
-      for (let i = 0; i < r.length; i++) {
-        const a = r[i], b = r[(i + 1) % r.length]
-        const [ax, ay] = toLocal(a[0], a[1]), [bx, by] = toLocal(b[0], b[1])
-        const nseg = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / spacingM))
-        for (let k = 0; k < nseg; k++) { const t = k / nseg; ll.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]) }
-      }
-      const end = ll.length
-      for (let i = start; i < end; i++) edges.push([i, i + 1 < end ? i + 1 : start])
-    }
-    addLoop(clean)
-    for (const h of cleanHoles) addLoop(h)
-
-    // vnitřní body na mřížce: uvnitř obrysu a mimo díry
-    const stepLon = spacingM / (111320 * cosLat)
-    const stepLat = spacingM / 111320
-    for (let lat = minLat + stepLat * 0.5; lat < maxLat; lat += stepLat)
-      for (let lon = minLon + stepLon * 0.5; lon < maxLon; lon += stepLon)
-        if (pointInRing(lon, lat, clean) && !cleanHoles.some(h => pointInRing(lon, lat, h))) ll.push([lon, lat])
-
-    // VÝŠKY z DMR jedním exportImage přes celý bbox výseku (ne per-bod přes terén provider —
-    // u velké plochy by to vystřelilo tisíce fetchů = ERR_INSUFFICIENT_RESOURCES). +GEOID → elipsoidální.
-    const maxSpanM = Math.max(wM, hM)
-    const size = Math.min(2048, Math.max(256, Math.ceil(maxSpanM / 5))) // ~DMR 5G rozlišení, cap 2048
-    const sampler = await fetchElevSampler('dmr5g', minLon, minLat, maxLon, maxLat, size)
-    if (v.isDestroyed()) return null
-    const heights = ll.map(([lon, lat]) => { const e = sampler(lon, lat); return e != null ? e + GEOID_CZ : NaN })
-    const validH = heights.filter(h => Number.isFinite(h)) as number[]
-    if (!validH.length) return null
-    const fallback = validH.slice().sort((a, b) => a - b)[Math.floor(validH.length / 2)]
-
-    const tris = cdt2d(ll.map(([lon, lat]) => toLocal(lon, lat)), edges, { exterior: false })
-    if (!tris.length) return null
-
-    const LIFT = 0.1 // nepatrné nadzvednutí, ať to nebliká z-fightingem s terénem
-    const positions: number[] = []
-    for (let i = 0; i < ll.length; i++) {
-      const hh = Number.isFinite(heights[i]) ? (heights[i] as number) : fallback
-      const p = Cesium.Cartesian3.fromDegrees(ll[i][0], ll[i][1], hh + LIFT)
-      positions.push(p.x, p.y, p.z)
-    }
-    // ponech jen trojúhelníky, jejichž těžiště leží uvnitř obrysu a mimo díry
-    // (robustní pro konkávní union i díry – nezávisí na chování cdt2d flagů)
-    const indices: number[] = []
-    for (const t of tris) {
-      const cxLon = (ll[t[0]][0] + ll[t[1]][0] + ll[t[2]][0]) / 3
-      const cyLat = (ll[t[0]][1] + ll[t[1]][1] + ll[t[2]][1]) / 3
-      if (!pointInRing(cxLon, cyLat, clean)) continue
-      if (cleanHoles.some(h => pointInRing(cxLon, cyLat, h))) continue
-      indices.push(t[0], t[1], t[2])
-    }
-    if (!indices.length) return null
-
-    return { positions, indices, anchor: { lon: midLon, lat: midLat, h: fallback }, ring: clean, holes: cleanHoles.length ? cleanHoles : undefined }
-  }
-
-  function makePatchPrimitive(data: DmrData): Cesium.Primitive {
-    const nv = data.positions.length / 3
-    const geom = new Cesium.Geometry({
-      attributes: {
-        position: new Cesium.GeometryAttribute({
-          componentDatatype: Cesium.ComponentDatatype.DOUBLE,
-          componentsPerAttribute: 3,
-          values: new Float64Array(data.positions),
-        }),
-      } as unknown as Cesium.GeometryAttributes,
-      indices: nv < 65536 ? new Uint16Array(data.indices) : new Uint32Array(data.indices),
-      primitiveType: Cesium.PrimitiveType.TRIANGLES,
-      boundingSphere: Cesium.BoundingSphere.fromVertices(data.positions),
-    })
-    return new Cesium.Primitive({
-      geometryInstances: new Cesium.GeometryInstance({
-        geometry: geom,
-        attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.fromCssColorString('#c9b58a')) },
-      }),
-      // plochý neosvětlený materiál: bez stínů/normál → žádná černá odvrácená strana
-      appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: false }),
-      asynchronous: false,
-    })
-  }
-
-  // sjednotí všechny vybrané parcely do JEDNÉ hranice (union) a postaví jeden detailní terén
-  // ořezaný spojenou hranicí (nesouvislé skupiny → víc výseků). Rychlejší i bez švů mezi parcelami.
-  async function buildDmrPatches() {
-    const v = viewerRef.current
-    if (!v || v.isDestroyed() || dmrLoading || parcelsRef.current.size === 0) return
-    setDmrLoading(true)
+  /**
+   * Výřez podle katastru jako export STEJNÝ jako dlaždice: čistý terén DMR 5G + zapečené ortofoto,
+   * jen ořezaný na hranici vybraných parcel/oblasti (ne celé čtverce). Zip: vyrez.obj + vyrez.mtl +
+   * vyrez.jpg + vray_material.ms + info.txt. Souřadnice v REÁLNÉM S-JTSK (EPSG:5514), bez posunu,
+   * výšky Bpv → lícuje s exportem dlaždic i s modely z Maxu. UV se berou z polohy v bboxu výřezu,
+   * takže jedno ortofoto přes celý výběr sedí na terén 1:1.
+   */
+  async function exportParcelCutout() {
+    if (parcelsRef.current.size === 0 || cutoutBusy) return
+    const ac = new AbortController()
+    abortRef.current = ac
+    setCutoutBusy(true)
+    setCutoutPct(-1)
+    setCutoutProgress('připravuji…')
     try {
-      // parcely jako uzavřené polygony pro union
+      // 1) sjednoť vybrané parcely (WGS84) do souvislých polygonů
       const polys = [...parcelsRef.current.values()].map(p => {
         const r = p.ring.map(([lo, la]) => [lo, la] as [number, number])
         if (r.length && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) r.push([r[0][0], r[0][1]])
@@ -2067,22 +1801,175 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       try { merged = polygonClipping.union(polys[0], ...polys.slice(1)) as [number, number][][][] }
       catch (e) { console.error('Union parcel selhal, padám na jednotlivé:', e); merged = polys }
 
-      // přestav všechny výseky podle aktuálního unionu
-      removeAllPatches()
-      let i = 0
-      for (const poly of merged) {
-        const outer = poly[0].map(([lo, la]) => [lo, la] as number[])
-        const holes = poly.slice(1).map(h => h.map(([lo, la]) => [lo, la] as number[]))
-        const data = await computePatchData(outer, holes)
-        if (!data || v.isDestroyed()) continue
-        const prim = makePatchPrimitive(data)
-        v.scene.primitives.add(prim)
-        const pid = `union-${i++}`
-        patchesRef.current.set(pid, { data, prim })
-        upsertObj({ id: `dmr-${pid}`, kind: 'dmr', name: 'Detailní terén', visible: true })
+      // 2) převod na S-JTSK + odstranění uzavíracího bodu + bbox celého výběru
+      const cleanRing = (r: number[][]) => {
+        const c = r.slice()
+        if (c.length > 1) { const a = c[0], b = c[c.length - 1]; if (Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6) c.pop() }
+        return c
       }
-      setPatchCount(patchesRef.current.size)
-    } finally { setDmrLoading(false) }
+      const patches: { outer: number[][]; holes: number[][][] }[] = []
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const poly of merged) {
+        const outer = cleanRing(poly[0].map(([lo, la]) => sjtskOf(lo, la) as number[]))
+        if (outer.length < 3) continue
+        const holes = poly.slice(1).map(h => cleanRing(h.map(([lo, la]) => sjtskOf(lo, la) as number[]))).filter(h => h.length >= 3)
+        for (const [x, y] of outer) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y) }
+        patches.push({ outer, holes })
+      }
+      if (!patches.length) throw new Error('Výběr nemá platnou plochu')
+      const spanX = maxX - minX, spanY = maxY - minY
+      if (!(spanX > 0) || !(spanY > 0)) throw new Error('Výběr má nulovou plochu')
+      const longSpan = Math.max(spanX, spanY)
+
+      // 3) výšky DMR přes bbox (S-JTSK) — ~2 m/px, strop 2048 na delší stranu
+      setCutoutProgress('stahuji výšky (DMR)…')
+      const demLong = Math.min(2048, Math.max(64, Math.ceil(longSpan / 2)))
+      const demW = Math.max(2, Math.round(demLong * spanX / longSpan))
+      const demH = Math.max(2, Math.round(demLong * spanY / longSpan))
+      const sampler = await fetchElevSamplerSJTSK(minX, minY, maxX, maxY, demW, demH, ac.signal)
+
+      // 4) ortofoto přes týž bbox jako jedna textura (delší strana = texSize, strop 4096)
+      setCutoutProgress('stahuji ortofoto…')
+      const texLong = Math.min(4096, texSize)
+      const texW = Math.max(1, Math.round(texLong * spanX / longSpan))
+      const texH = Math.max(1, Math.round(texLong * spanY / longSpan))
+      const jpg = await fetchJpegRetry(mapBboxUrl(minX, minY, maxX, maxY, texW, texH, 'ortofoto', 'ZTM250'), ac.signal, 'Ortofoto')
+
+      // 5) triangulace každého výseku v S-JTSK, ořez hranicí, UV z polohy v bboxu
+      setCutoutProgress('skládám…')
+      const spacing = Math.max(meshStep, longSpan / 300) // hustota jako dlaždice, ale strop na velkou plochu
+
+      // OBJ text jednoho výseku (v/vt/f) s globálním offsetem indexů vBase; null = žádná plocha
+      const buildPatch = (sp: { outer: number[][]; holes: number[][][] }, vBase: number): { text: string; nv: number; nf: number } | null => {
+        // body + constrained hrany: obrys i díry jako zhuštěné uzavřené smyčky
+        const pts: number[][] = []
+        const edges: number[][] = []
+        const addLoop = (r: number[][]) => {
+          const start = pts.length
+          for (let i = 0; i < r.length; i++) {
+            const a = r[i], b = r[(i + 1) % r.length]
+            const nseg = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / spacing))
+            for (let k = 0; k < nseg; k++) { const t = k / nseg; pts.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]) }
+          }
+          const end = pts.length
+          for (let i = start; i < end; i++) edges.push([i, i + 1 < end ? i + 1 : start])
+        }
+        addLoop(sp.outer)
+        for (const h of sp.holes) addLoop(h)
+
+        // vnitřní body na mřížce (bbox výseku): uvnitř obrysu a mimo díry
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+        for (const [x, y] of sp.outer) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
+        for (let y = y0 + spacing * 0.5; y < y1; y += spacing)
+          for (let x = x0 + spacing * 0.5; x < x1; x += spacing)
+            if (pointInRing(x, y, sp.outer) && !sp.holes.some(h => pointInRing(x, y, h))) pts.push([x, y])
+
+        // výšky Bpv (bez geoidu) + medián jako náhrada za díry v DMR
+        const heights = pts.map(([x, y]) => { const e = sampler(x, y); return e != null ? e : NaN })
+        const valid = heights.filter(h => Number.isFinite(h)) as number[]
+        if (!valid.length) return null
+        const fallback = valid.slice().sort((a, b) => a - b)[Math.floor(valid.length / 2)]
+
+        const tris = cdt2d(pts, edges, { exterior: false })
+        if (!tris.length) return null
+
+        const L: string[] = []
+        for (let i = 0; i < pts.length; i++) {
+          const z = Number.isFinite(heights[i]) ? (heights[i] as number) : fallback
+          L.push(`v ${pts[i][0].toFixed(3)} ${pts[i][1].toFixed(3)} ${z.toFixed(3)}`)
+        }
+        // vt: poloha v bboxu → sedí na jpg (sever = maxY = horní okraj obrázku = v 1)
+        for (let i = 0; i < pts.length; i++)
+          L.push(`vt ${((pts[i][0] - minX) / spanX).toFixed(6)} ${((pts[i][1] - minY) / spanY).toFixed(6)}`)
+        // f: jen trojúhelníky se středem uvnitř obrysu a mimo díry; vinutí CCW → normála +Z
+        let nf = 0
+        for (const t of tris) {
+          const cx = (pts[t[0]][0] + pts[t[1]][0] + pts[t[2]][0]) / 3
+          const cy = (pts[t[0]][1] + pts[t[1]][1] + pts[t[2]][1]) / 3
+          if (!pointInRing(cx, cy, sp.outer)) continue
+          if (sp.holes.some(h => pointInRing(cx, cy, h))) continue
+          let i0 = t[0], i1 = t[1], i2 = t[2]
+          const area = (pts[i1][0] - pts[i0][0]) * (pts[i2][1] - pts[i0][1]) - (pts[i2][0] - pts[i0][0]) * (pts[i1][1] - pts[i0][1])
+          if (area < 0) { const tmp = i1; i1 = i2; i2 = tmp } // otoč na CCW (lícem nahoru, +Z)
+          const a = vBase + i0, b = vBase + i1, c = vBase + i2
+          L.push(`f ${a}/${a} ${b}/${b} ${c}/${c}`)
+          nf++
+        }
+        if (!nf) return null
+        return { text: L.join('\n'), nv: pts.length, nf }
+      }
+
+      // 6) streamovaný zip (jako u dlaždic — velký výběr by jinak přetekl strop délky stringu)
+      const chunks: Uint8Array[] = []
+      let zipErr: unknown = null
+      const zip = new Zip((err, dat) => { if (err) zipErr = err; else if (dat) chunks.push(dat) })
+      const check = () => { if (zipErr) throw zipErr instanceof Error ? zipErr : new Error(String(zipErr)) }
+
+      const objF = new ZipDeflate('vyrez.obj', { level: 1 })
+      zip.add(objF)
+      objF.push(strToU8('mtllib vyrez.mtl\no vyrez\ng vyrez\nusemtl vyrez\n'), false)
+      let vBase = 1
+      let built = 0
+      let totalTris = 0
+      for (const sp of patches) {
+        if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
+        const part = buildPatch(sp, vBase)
+        if (part) {
+          objF.push(strToU8(part.text + '\n'), false)
+          vBase += part.nv
+          totalTris += part.nf
+          check()
+        }
+        setCutoutPct(++built / patches.length)
+        setCutoutProgress(`skládám ${built}/${patches.length}`)
+        await new Promise(r => setTimeout(r, 0))
+      }
+      objF.push(new Uint8Array(0), true)
+      check()
+      if (vBase === 1) throw new Error('Z výběru nevznikla žádná plocha (chybí DMR data?)')
+
+      const jf = new ZipPassThrough('vyrez.jpg')
+      zip.add(jf); jf.push(jpg, true); check()
+
+      const addText = (name: string, text: string) => { const d = new ZipDeflate(name, { level: 6 }); zip.add(d); d.push(strToU8(text), true); check() }
+      addText('vyrez.mtl', ['newmtl vyrez', 'Ka 0.000 0.000 0.000', 'Kd 1.000 1.000 1.000', 'Ks 0.000 0.000 0.000', 'd 1.0', 'illum 1', 'map_Kd vyrez.jpg', ''].join('\n'))
+      addText('vray_material.ms', buildMaxScriptFiles(['vyrez.jpg']))
+      addText('info.txt', [
+        'Teren DMR 5G + ortofoto (CUZK) — VYREZ podle hranic katastru',
+        '',
+        'Souřadnice: REÁLNÉ S-JTSK / Křovák East North (EPSG:5514), výšky Bpv.',
+        'Žádný posun — vrcholy jsou na skutečných souřadnicích (lícuje s exportem dlaždic).',
+        'Terén je ořezaný přesně na hranici vybraných parcel/oblasti (ne celé čtverce).',
+        '',
+        'Import do 3ds Max:',
+        '  1) File > Import > vyrez.obj (texturu natáhne vyrez.mtl)',
+        '  2) Chceš-li V-Ray: spusť Scripting > Run Script > vray_material.ms',
+        '  Rozbal celý zip do JEDNÉ složky, MTL i skript hledají vyrez.jpg vedle sebe.',
+        '',
+        `Rozsah bbox: X ${Math.round(minX)} … ${Math.round(maxX)}, Y ${Math.round(minY)} … ${Math.round(maxY)}`,
+        `Plocha bboxu: ${spanX.toFixed(0)} × ${spanY.toFixed(0)} m`,
+        `Mřížka terénu: ~${spacing.toFixed(2)} m (zdrojový DMR 5G má body po ~2,8 m)`,
+        `Textura: ${texW} × ${texH} px = ${(spanX / texW * 100).toFixed(1)} cm/px (ortofoto ČÚZK má nativně 20 cm/px)`,
+        `Trojúhelníků: ~${totalTris}`,
+        'Y je mřížkový sever Křováku, ne pravý sever (meridiánová konvergence ~7°).',
+        '',
+        `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
+      ].join('\n'))
+
+      zip.end()
+      check()
+      download(concatBytes(chunks), `vyrez_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
+      toast.success(`Vyvezen výřez (${patches.length} ${patches.length === 1 ? 'plocha' : 'ploch'}) s ortofotem`)
+    } catch (e) {
+      if (isAbortError(e)) { toast.info('Export zrušen'); return }
+      console.error('Export výřezu selhal:', e)
+      toast.error(e instanceof Error ? e.message : 'Export výřezu selhal')
+    } finally {
+      abortRef.current = null
+      setCutoutBusy(false)
+      setCutoutProgress('')
+      setCutoutPct(-1)
+    }
   }
 
   // OSM budovy (Cesium ion) — líné vytvoření + zap/vyp
@@ -2243,14 +2130,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     const vis = !o.visible
     if (o.kind === 'model') { const e = modelsRef.current.get(o.id); if (e) { e.model.show = vis; e.visible = vis } }
     else if (o.kind === 'parcel') parcelsRef.current.get(o.id.replace('parcel-', ''))?.ents.forEach(en => { en.show = vis })
-    else if (o.kind === 'dmr') { const pt = patchesRef.current.get(o.id.replace('dmr-', '')); if (pt) pt.prim.show = vis }
     setObjects(list => list.map(x => x.id === o.id ? { ...x, visible: vis } : x))
   }
 
   function deleteObject(o: SceneObj) {
     if (o.kind === 'model') deleteModel(o.id)
     else if (o.kind === 'parcel') removeParcel(o.id.replace('parcel-', ''))
-    else if (o.kind === 'dmr') removePatch(o.id.replace('dmr-', ''))
   }
 
   function commitRename() {
@@ -2493,6 +2378,21 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         <button onClick={() => fileRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
           <Upload size={15} /> Import modelu
         </button>
+        {cacheInfo.count > 0 && (
+          <>
+            <div className="h-px bg-gray-700 my-0.5" />
+            <div className="flex items-center justify-between gap-2 px-1 text-[10px] text-gray-500">
+              <span title="Stažené dlaždice uložené na disku (přežijí refresh, šetří ČÚZK)">
+                Cache: {(cacheInfo.bytes / 1e6).toFixed(0)} MB · {cacheInfo.count} dl.
+              </span>
+              <button
+                onClick={() => cacheClear().then(refreshCache)}
+                title="Smazat cache dlaždic z disku"
+                className="text-gray-500 hover:text-red-300"
+              >vymazat</button>
+            </div>
+          </>
+        )}
       </div>
 
       {/* vybraná městská část */}
@@ -2511,39 +2411,59 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         <div className={`absolute ${parcelCount > 0 ? 'bottom-16' : 'bottom-3'} left-3 z-10 flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur text-sm`}>
           <Grid3x3 size={14} className="text-cyan-400" />
           <span className="text-gray-200">Dlaždice: <span className="font-medium">{tileCount}</span> × {tileSize} m</span>
-          <span className="text-gray-500 text-xs">
-          {(() => {
-            const n = gridSize({ ix: 0, iy: 0, size: tileSize }, meshStep)
-            const tris = tileCount * 2 * (n - 1) ** 2
-            const mb = estimateObjBytes(tileCount, tileSize, meshStep) / 1e6
-            const heavy = mb > 150
-            return (
-              <span className={heavy ? 'text-amber-400 text-xs' : 'text-gray-500 text-xs'} title={heavy ? 'Velký OBJ — zvaž řidší mřížku terénu nebo míň dlaždic' : undefined}>
-                {tris >= 1e6 ? `~${(tris / 1e6).toFixed(1)} M trojúh.` : `~${Math.round(tris / 1e3)} k trojúh.`}
-                {' · OBJ ~'}{mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`}
+          {tileBusy ? (
+            <>
+              <div className="flex items-center gap-2 ml-1">
+                <div className="w-40 h-1.5 rounded-full bg-gray-700 overflow-hidden">
+                  {tilePct >= 0
+                    ? <div className="h-full bg-emerald-500 transition-[width] duration-200" style={{ width: `${Math.max(3, Math.round(tilePct * 100))}%` }} />
+                    : <div className="h-full w-1/3 bg-emerald-500/70 animate-pulse" />}
+                </div>
+                <span className="text-gray-300 text-xs tabular-nums whitespace-nowrap">{tileProgress || 'pracuji…'}</span>
+              </div>
+              <button
+                onClick={() => abortRef.current?.abort()}
+                title="Zrušit stahování"
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs"
+              >
+                <X size={13} /> Zrušit
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-gray-500 text-xs">
+              {(() => {
+                const n = gridSize({ ix: 0, iy: 0, size: tileSize }, meshStep)
+                const tris = tileCount * 2 * (n - 1) ** 2
+                const mb = estimateObjBytes(tileCount, tileSize, meshStep) / 1e6
+                const heavy = mb > 150
+                return (
+                  <span className={heavy ? 'text-amber-400 text-xs' : 'text-gray-500 text-xs'} title={heavy ? 'Velký OBJ — zvaž řidší mřížku terénu nebo míň dlaždic' : undefined}>
+                    {tris >= 1e6 ? `~${(tris / 1e6).toFixed(1)} M trojúh.` : `~${Math.round(tris / 1e3)} k trojúh.`}
+                    {' · OBJ ~'}{mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`}
+                  </span>
+                )
+              })()}
               </span>
-            )
-          })()}
-          </span>
-          <button
-            onClick={exportTilesObj}
-            disabled={tileBusy}
-            title="Čistý terén DMR 5G s ortofoto texturou → zip s OBJ + MTL + JPEG pro 3ds Max"
-            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs disabled:opacity-50"
-          >
-            {tileBusy ? <><Loader2 size={13} className="animate-spin" /> {tileProgress}</> : <><Download size={13} /> Terén + ortofoto (OBJ)</>}
-          </button>
-          <button
-            onClick={exportStitchedMaps}
-            disabled={tileBusy}
-            title="Spojená 2D mapa přes výběr — ortofoto i topografická mapa jako jeden georeferencovaný obrázek (world file)"
-            className="flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs disabled:opacity-50"
-          >
-            {tileBusy ? <><Loader2 size={13} className="animate-spin" /> {tileProgress}</> : <><Image size={13} /> Spojená mapa (2D)</>}
-          </button>
-          <button onClick={clearTiles} title="Zrušit výběr dlaždic" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
-            <Trash2 size={14} />
-          </button>
+              <button
+                onClick={exportTilesObj}
+                title="Čistý terén DMR 5G s ortofoto texturou → zip s OBJ + MTL + JPEG pro 3ds Max"
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs"
+              >
+                <Download size={13} /> Terén + ortofoto (OBJ)
+              </button>
+              <button
+                onClick={exportStitchedMaps}
+                title="Spojená 2D mapa přes výběr — ortofoto i topografická mapa jako jeden georeferencovaný obrázek (world file)"
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs"
+              >
+                <Image size={13} /> Spojená mapa (2D)
+              </button>
+              <button onClick={clearTiles} title="Zrušit výběr dlaždic" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
+                <Trash2 size={14} />
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -2552,28 +2472,33 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur text-sm">
           <MapPin size={14} className="text-cyan-400" />
           <span className="text-gray-200">Parcely: <span className="font-medium">{parcelCount}</span></span>
-          <button onClick={buildDmrPatches} disabled={dmrLoading} className="ml-1 flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs disabled:opacity-50">
-            {dmrLoading ? <Loader2 size={13} className="animate-spin" /> : <Mountain size={13} />} Detailní terén
-          </button>
-          <button onClick={exportParcelsDxf} disabled={exporting} title="Export hranic parcel jako křivky (DXF pro 3ds Max)" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs disabled:opacity-50">
-            {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} hranice (DXF)
-          </button>
-          {patchCount > 0 && (
+          {cutoutBusy ? (
             <>
-              <button onClick={exportDmrGlb} title="Export do glb (reimport na stejné místo)" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs">
-                <Download size={13} /> glb
+              <div className="flex items-center gap-2 ml-1">
+                <div className="w-40 h-1.5 rounded-full bg-gray-700 overflow-hidden">
+                  {cutoutPct >= 0
+                    ? <div className="h-full bg-emerald-500 transition-[width] duration-200" style={{ width: `${Math.max(3, Math.round(cutoutPct * 100))}%` }} />
+                    : <div className="h-full w-1/3 bg-emerald-500/70 animate-pulse" />}
+                </div>
+                <span className="text-gray-300 text-xs tabular-nums whitespace-nowrap">{cutoutProgress || 'pracuji…'}</span>
+              </div>
+              <button onClick={() => abortRef.current?.abort()} title="Zrušit stahování" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs">
+                <X size={13} /> Zrušit
               </button>
-              <button onClick={exportDmrObj} title="Export do OBJ (pro 3ds Max apod.)" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-700 hover:bg-sky-600 text-white text-xs">
-                <Download size={13} /> OBJ
+            </>
+          ) : (
+            <>
+              <button onClick={exportParcelCutout} title="Výřez terénu DMR 5G ořezaný na hranici výběru + zapečené ortofoto → zip (OBJ + MTL + JPEG + V-Ray) pro 3ds Max" className="ml-1 flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs">
+                <Download size={13} /> Terén + ortofoto (OBJ)
               </button>
-              <button onClick={removeAllPatches} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs">
-                <Mountain size={13} /> Odebrat terén
+              <button onClick={exportParcelsDxf} disabled={exporting} title="Export hranic parcel jako křivky (DXF pro 3ds Max)" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs disabled:opacity-50">
+                {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} hranice (DXF)
+              </button>
+              <button onClick={clearAllParcels} title="Zrušit výběr všech parcel" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
+                <Trash2 size={14} />
               </button>
             </>
           )}
-          <button onClick={clearAllParcels} title="Zrušit výběr všech parcel" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
-            <Trash2 size={14} />
-          </button>
         </div>
       )}
 
@@ -2589,7 +2514,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
                 selectedId === o.id ? 'bg-emerald-600/25 text-emerald-100' : 'text-gray-300 hover:bg-gray-800'
               }`}
             >
-              <span className="text-[10px] text-gray-500 w-9 shrink-0">{o.kind === 'model' ? 'model' : o.kind === 'parcel' ? 'parc' : o.kind === 'dmr' ? 'terén' : 'ploch'}</span>
+              <span className="text-[10px] text-gray-500 w-9 shrink-0">{o.kind === 'model' ? 'model' : o.kind === 'parcel' ? 'parc' : 'ploch'}</span>
               {renamingId === o.id ? (
                 <input
                   autoFocus value={renameDraft}

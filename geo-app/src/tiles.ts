@@ -12,6 +12,7 @@
  */
 import proj4 from 'proj4'
 import { fromArrayBuffer } from 'geotiff'
+import { cacheGet, cachePut } from './cache'
 
 // S-JTSK / Křovák — 7-parametrový Helmert (posun se srovná na ~decimetry).
 // Definuje se tady, protože tenhle modul se načítá jako první; MapView spoléhá na tenhle def.
@@ -132,37 +133,85 @@ export const gridSize = (t: Tile, step: number) => Math.max(2, Math.round(t.size
 export const stepOf = (t: Tile, n: number) => t.size / (n - 1)
 
 /**
+ * Fetch s opakováním a prodlevou proti flaky ČÚZK (ArcGIS občas vrátí 5xx / timeout / poškozenou
+ * odpověď). `parse` si sám ověří odpověď (ok, typ, obsah) a vrátí výsledek; když cokoliv hodí
+ * (kromě AbortError), zkusí se to znovu s rostoucí pauzou. Zrušení uživatelem se NEopakuje.
+ * Modul zůstává bez DOMu (fetch + setTimeout), takže jde testovat i mimo prohlížeč.
+ */
+export async function fetchRetry<T>(url: string, opts: { signal?: AbortSignal; tries?: number; parse: (res: Response) => Promise<T> }): Promise<T> {
+  const tries = opts.tries ?? 4
+  let lastErr: unknown = null
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    if (opts.signal?.aborted) throw new DOMException('Zrušeno', 'AbortError')
+    try {
+      const res = await fetch(url, { signal: opts.signal })
+      return await opts.parse(res)
+    } catch (e) {
+      if ((e instanceof DOMException && e.name === 'AbortError') || opts.signal?.aborted) throw e
+      lastErr = e
+      if (attempt < tries) await new Promise(r => setTimeout(r, 500 * attempt)) // narůstající pauza
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+}
+
+/** Stáhne JPEG (ortofoto) s opakováním; ověří stav, typ i magická čísla JPEGu (FF D8) proti
+ *  poškozené/prázdné odpovědi. Blankový-ale-platný JPEG nepozná (to umí jen dekódování v prohlížeči). */
+export async function fetchJpegRetry(url: string, signal?: AbortSignal, label = 'Obrázek'): Promise<Uint8Array> {
+  return fetchRetry(url, { signal, parse: async res => {
+    if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
+    const ct = res.headers.get('content-type') || ''
+    if (!ct.startsWith('image/')) throw new Error(`${label}: nečekaný typ odpovědi (${ct || 'bez typu'})`)
+    const b = new Uint8Array(await res.arrayBuffer())
+    if (b.length < 100 || b[0] !== 0xff || b[1] !== 0xd8) throw new Error(`${label}: poškozený/prázdný JPEG`)
+    return b
+  } })
+}
+
+/**
  * Výšky DMR 5G pro dlaždici jako pravidelná mřížka n×n uzlů, v S-JTSK.
  * bbox se roztáhne o půl buňky → středy pixelů padnou PŘESNĚ na uzly mřížky, takže sousední
  * dlaždice čtou na společné hraně tytéž hodnoty a v Maxu mezi nimi není šev.
  * (Ověřeno proti živým datům: rozdíl na sdílené hraně je 0.000000 m.)
  */
-export async function fetchTileHeights(t: Tile, step: number): Promise<TileGrid> {
-  const { x0, y0, x1, y1 } = tileBounds(t)
+export async function fetchTileHeights(t: Tile, step: number, signal?: AbortSignal): Promise<TileGrid> {
   const n = gridSize(t, step)
+  // cache: výšky jako syrové bajty Float32 (klíč = poloha + krok). Hit = žádná síť ani parse.
+  const key = `dmr/${t.size}/${t.ix}/${t.iy}/${step}`
+  const cached = await cacheGet(key)
+  if (cached && cached.byteLength === n * n * 4) {
+    return { n, h: new Float32Array(cached.slice().buffer) }
+  }
+  const { x0, y0, x1, y1 } = tileBounds(t)
   const half = stepOf(t, n) / 2
   const url = `${DMR_EXPORT}?bbox=${x0 - half},${y0 - half},${x1 + half},${y1 + half}&bboxSR=5514&imageSR=5514&size=${n},${n}&format=tiff&pixelType=F32&f=image`
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`DMR 5G: HTTP ${res.status}`)
-  const img = await (await fromArrayBuffer(await res.arrayBuffer())).getImage()
-  if (img.getWidth() !== n || img.getHeight() !== n) throw new Error(`DMR 5G vrátil ${img.getWidth()}×${img.getHeight()}, čekal ${n}×${n}`)
-  const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
-  const h = new Float32Array(n * n)
-  for (let i = 0; i < n * n; i++) {
-    const e = r[i] as number
-    h[i] = Number.isFinite(e) && e > -500 && e < 3000 ? e : NaN
-  }
+  const h = await fetchRetry(url, { signal, parse: async res => {
+    if (!res.ok) throw new Error(`DMR 5G: HTTP ${res.status}`)
+    const img = await (await fromArrayBuffer(await res.arrayBuffer())).getImage()
+    if (img.getWidth() !== n || img.getHeight() !== n) throw new Error(`DMR 5G vrátil ${img.getWidth()}×${img.getHeight()}, čekal ${n}×${n}`)
+    const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
+    const out = new Float32Array(n * n)
+    for (let i = 0; i < n * n; i++) {
+      const e = r[i] as number
+      out[i] = Number.isFinite(e) && e > -500 && e < 3000 ? e : NaN
+    }
+    return out
+  } })
+  await cachePut(key, new Uint8Array(h.buffer.slice(0)))
   return { n, h }
 }
 
 /** Ortofoto pro dlaždici — stejný bbox v 5514, takže obrázek kryje čtverec přesně (UV bez zkreslení).
  *  Vrací syrové JPEG bajty ze serveru: do zipu jdou beze změny, tedy bez překódování a ztráty kvality. */
-export async function fetchTileOrtho(t: Tile, texSize: number): Promise<Uint8Array> {
+export async function fetchTileOrtho(t: Tile, texSize: number, signal?: AbortSignal): Promise<Uint8Array> {
+  const key = `orto/${t.size}/${t.ix}/${t.iy}/${texSize}`
+  const cached = await cacheGet(key)
+  if (cached) return cached
   const { x0, y0, x1, y1 } = tileBounds(t)
   const url = `${ORTO_EXPORT}?bbox=${x0},${y0},${x1},${y1}&bboxSR=5514&imageSR=5514&size=${texSize},${texSize}&format=jpg&f=image`
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`Ortofoto: HTTP ${res.status}`)
-  return new Uint8Array(await res.arrayBuffer())
+  const bytes = await fetchJpegRetry(url, signal, 'Ortofoto')
+  await cachePut(key, bytes)
+  return bytes
 }
 
 /**
@@ -221,7 +270,15 @@ export function buildMtl(tiles: Tile[]): string {
  * Záměrně BEZ diakritiky: starší Max čte .ms v systémové kódové stránce, ne v UTF-8.
  */
 export function buildMaxScript(tiles: Tile[]): string {
-  const files = tiles.map(t => `"${tileName(t)}.jpg"`).join(', ')
+  return buildMaxScriptFiles(tiles.map(t => `${tileName(t)}.jpg`))
+}
+
+/**
+ * Táž logika jako buildMaxScript, jen bere přímo seznam JPEG jmen — aby ji mohl použít i
+ * výřez podle katastru (jeden objekt/textura), ne jen mřížka dlaždic.
+ */
+export function buildMaxScriptFiles(jpgNames: string[]): string {
+  const files = jpgNames.map(n => `"${n}"`).join(', ')
   // ASCII a bez dvojznacnosti — toLocaleString('cs-CZ') dava nezlomitelne mezery (U+00A0)
   const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
   return `/*
