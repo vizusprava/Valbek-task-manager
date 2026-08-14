@@ -6,3 +6,10 @@ dist
 .env
 .env.*
 !.env.example
+
+# lokální ortofoto dlaždice (seed-liberec.mjs) — velké, negitovat
+local-tiles/
+
+# velké splat zdroje (.ply) — negitovat
+splat-src/
+*.ply
