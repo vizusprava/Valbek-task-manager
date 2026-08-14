@@ -185,6 +185,18 @@ function readEntityInto(toks: Prop[], i: number, into: RawEnt[], readEnt: (i: nu
     into.push(ent)
     return k
   }
+  if (ent.type === 'INSERT') {
+    // atributy bloku (ATTRIB) mohou následovat za INSERT až po SEQEND (jako VERTEX u POLYLINE)
+    let k = next
+    while (k < toks.length && toks[k].code === 0) {
+      const m = toks[k].value.trim()
+      if (m === 'ATTRIB') { const r = readEnt(k); ent.vertices.push(r.ent); k = r.next; continue }
+      if (m === 'SEQEND') { const r = readEnt(k); k = r.next; break }
+      break
+    }
+    into.push(ent)
+    return k
+  }
   into.push(ent)
   return next
 }
@@ -194,6 +206,24 @@ function layerColor(props: Prop[]): number {
   if (tc !== undefined) { const n = parseInt(tc, 10); if (Number.isFinite(n)) return n & 0xffffff }
   const ci = Math.abs(flag(props, 62))
   return ACI[ci] ?? 0xffffff
+}
+
+/**
+ * Vyčistí MTEXT/TEXT řetězec z DXF: dekóduje `\U+XXXX` unicode, stacking `\S…^…;`, odstraní
+ * formátovací kódy (`\A;`, `\C;`, `\f…;`, `\H;`, `\P`…), TEXT `%%` kódy a řídící `^X` znaky.
+ * Bez tohohle vyjdou popisky zprzněné (např. „…U+2030203020…") nebo prázdné.
+ */
+export function cleanDxfText(raw: string): string {
+  let s = raw
+  s = s.replace(/\\U\+([0-9A-Fa-f]{4})/g, (_m, h: string) => String.fromCodePoint(parseInt(h, 16))) // unicode
+  s = s.replace(/\\S([^;]*?)[\^/#]([^;]*?);/g, (_m, a: string, b: string) => b.trim() ? `${a.trim()}/${b.trim()}` : a.trim()) // stacking „nad/pod"
+  s = s.replace(/\\P/g, ' ').replace(/\\~/g, ' ')                 // odstavec / nezlom. mezera
+  s = s.replace(/\\[A-Za-z][^;\\]*;/g, '')                        // formátovací kódy s ; (font/barva/výška…)
+  s = s.replace(/\\[LlOoKk]/g, '')                                // pod/nad/přeškrt on/off
+  s = s.replace(/[{}]/g, '')                                      // seskupovací závorky
+  s = s.replace(/%%[dD]/g, '°').replace(/%%[cC]/g, '⌀').replace(/%%[pP]/g, '±').replace(/%%%/g, '%').replace(/%%[uUoO]/g, '') // TEXT %% kódy
+  s = s.replace(/\^[IJM]/g, ' ')                                  // řídící ^I/^J/^M
+  return s.replace(/\s+/g, ' ').trim()
 }
 
 export function dxfToPrims(text: string): DrawParse {
@@ -281,7 +311,7 @@ export function dxfToPrims(text: string): DrawParse {
       case 'TEXT':
       case 'MTEXT': {
         const raw = e.props.filter(p => p.code === 1 || p.code === 3).map(p => p.value).join('')
-        const clean = raw.replace(/\\[A-Za-z][^;]*;/g, '').replace(/[{}]/g, '').trim()
+        const clean = cleanDxfText(raw)
         if (clean) {
           const p = apply(tf, num(e.props, 10), num(e.props, 20)); track(p[0], p[1])
           prims.push({ kind: 'text', pt: p, text: clean, height: num(e.props, 40, 2) * Math.hypot(tf.a, tf.b), rot: num(e.props, 50) * Math.PI / 180, layer, color })
@@ -290,13 +320,23 @@ export function dxfToPrims(text: string): DrawParse {
       }
       case 'INSERT': {
         if (depth > 8) break
-        const blk = blocks[str(e.props, 2) ?? '']
-        if (!blk?.entities.length) break
         const sx = num(e.props, 41, 1), sy = num(e.props, 42, 1), rot = num(e.props, 50) * Math.PI / 180
         const cr = Math.cos(rot), sr = Math.sin(rot)
         const local: Affine = { a: cr * sx, b: sr * sx, c: -sr * sy, d: cr * sy, e: num(e.props, 10), f: num(e.props, 20) }
-        const t2 = compose(tf, local)
-        for (const be of blk.entities) emit(be, t2, color, depth + 1)
+        const blk = blocks[str(e.props, 2) ?? '']
+        if (blk?.entities.length) { const t2 = compose(tf, local); for (const be of blk.entities) emit(be, t2, color, depth + 1) }
+        // ATTRIB (hodnoty atributů) — pozice už je v prostoru INSERTu, kreslíme přes `tf`.
+        // U zarovnaného textu (72/73 != 0) je skutečná pozice v 11/21, jinak v 10/20.
+        for (const at of e.vertices) {
+          if (at.type !== 'ATTRIB') continue
+          const clean = cleanDxfText(at.props.filter(pp => pp.code === 1 || pp.code === 3).map(pp => pp.value).join(''))
+          if (!clean) continue
+          const aligned = flag(at.props, 72) !== 0 || flag(at.props, 73) !== 0
+          const ax = aligned ? num(at.props, 11) : num(at.props, 10)
+          const ay = aligned ? num(at.props, 21) : num(at.props, 20)
+          const p = apply(tf, ax, ay); track(p[0], p[1])
+          prims.push({ kind: 'text', pt: p, text: clean, height: num(at.props, 40, 2) * Math.hypot(tf.a, tf.b), rot: num(at.props, 50) * Math.PI / 180, layer: str(at.props, 8) ?? layer, color: colorOf(at, color) })
+        }
         break
       }
     }

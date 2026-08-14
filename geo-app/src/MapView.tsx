@@ -256,7 +256,14 @@ type ModelEntry = {
 type SceneObj = { id: string; kind: 'model' | 'parcel' | 'surface' | 'drawing'; name: string; visible: boolean }
 // jedna hladina výkresu — vlastní Cesium primitivy, aby šla samostatně zapnout/vypnout
 type DrawLayer = { name: string; color: number; visible: boolean; prim: Cesium.Primitive | null; labels: Cesium.LabelCollection | null; points: Cesium.PointPrimitiveCollection | null }
-type DrawingEntry = { layers: DrawLayer[]; bounds: Cesium.Rectangle | null }
+// `up` = svislý směr ve středu výkresu (pro posun výšky přes modelMatrix). *Refs = odkazy na prvky
+// + jejich základní barvy (pro živé nastavení průhlednosti celého výkresu).
+type DrawingEntry = {
+  layers: DrawLayer[]; bounds: Cesium.Rectangle | null; up: Cesium.Cartesian3
+  labelRefs: { l: Cesium.Label; f: Cesium.Color; o: Cesium.Color }[]
+  pointRefs: { p: Cesium.PointPrimitive; c: Cesium.Color }[]
+  polyRefs: { prim: Cesium.Primitive; id: string; c: Cesium.Color }[]
+}
 const EMPTY_NAMESET: ReadonlySet<string> = new Set()
 
 /**
@@ -851,6 +858,8 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const parcelsRef = useRef<Map<string, { positions: Cesium.Cartesian3[]; ring: number[][]; ents: Cesium.Entity[] }>>(new Map())
   // nahrané výkresy (DXF/DWG): čáry/popisky/body po hladinách + obalové bounds
   const drawingsRef = useRef<Map<string, DrawingEntry>>(new Map())
+  const [drawH, setDrawH] = useState<Record<string, number>>({})   // svislý posun výkresu (m)
+  const [drawA, setDrawA] = useState<Record<string, number>>({})   // průhlednost výkresu (0..1)
   const fileRef = useRef<HTMLInputElement>(null)
   const dwgRef = useRef<HTMLInputElement>(null)
 
@@ -3250,6 +3259,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     } catch { /* nech výchozí */ }
     if (v.isDestroyed()) return
 
+    // svislý směr ve středu (pro posun výšky) + sběr odkazů na prvky (pro živou průhlednost)
+    const up = Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(Cesium.Cartesian3.fromDegrees(clon, clat, h0), new Cesium.Cartesian3())
+    const labelRefs: DrawingEntry['labelRefs'] = []
+    const pointRefs: DrawingEntry['pointRefs'] = []
+    const polyRefs: DrawingEntry['polyRefs'] = []
+
     let wlon = Infinity, elon = -Infinity, slat = Infinity, nlat = -Infinity
     const seen = (lon: number, lat: number) => { if (lon < wlon) wlon = lon; if (lon > elon) elon = lon; if (lat < slat) slat = lat; if (lat > nlat) nlat = lat }
 
@@ -3258,18 +3273,27 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     for (const p of parse.prims) { const arr = byLayer.get(p.layer); if (arr) arr.push(p); else byLayer.set(p.layer, [p]) }
 
     const layers: DrawLayer[] = []
-    let labelBudget = 1500 // strop popisků kvůli výkonu (napříč hladinami)
+    // velké výkresy mají desetitisíce textů → vysoký strop + vzdálenostní LOD (popisky se schovají
+    // až při extrémním oddálení, ať to nesestřelí výkon). Rozsah odhadneme z velikosti výkresu.
+    const drawSpanM = Math.max(parse.maxX - parse.minX, parse.maxY - parse.minY) || 2000
+    const labelFar = Math.min(200000, Math.max(8000, drawSpanM * 3))
+    let labelBudget = 30000
     for (const [lname, lprims] of byLayer) {
       const instances: Cesium.GeometryInstance[] = []
+      const polyMeta: { id: string; c: Cesium.Color }[] = []
       for (const p of lprims) {
         if (p.kind !== 'poly') continue
         const deg: number[] = []
         for (const [x, y] of p.pts) { const [lon, lat] = toLL(x, y); deg.push(lon, lat, h0); seen(lon, lat) }
         if (deg.length < 6) continue
+        const col = dwgColor(p.color)
+        const iid = `${lname}#${polyMeta.length}`
         instances.push(new Cesium.GeometryInstance({
+          id: iid,
           geometry: new Cesium.PolylineGeometry({ positions: Cesium.Cartesian3.fromDegreesArrayHeights(deg), width: 2, arcType: Cesium.ArcType.NONE, vertexFormat: Cesium.PolylineColorAppearance.VERTEX_FORMAT }),
-          attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(dwgColor(p.color)) },
+          attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(col) },
         }))
+        polyMeta.push({ id: iid, c: col })
       }
       // depthTest vypnutý → čáry se kreslí přes vše, takže výkres je vidět i pod terénem
       const prim = instances.length
@@ -3279,6 +3303,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
             asynchronous: false,
           }))
         : null
+      if (prim) for (const m of polyMeta) polyRefs.push({ prim, id: m.id, c: m.c })
 
       let labels: Cesium.LabelCollection | null = null
       const texts = lprims.filter((p): p is Extract<DrawPrim, { kind: 'text' }> => p.kind === 'text')
@@ -3287,7 +3312,9 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         for (const t of texts) {
           if (labelBudget-- <= 0) break
           const [lon, lat] = toLL(t.pt[0], t.pt[1]); seen(lon, lat)
-          labels.add({ position: Cesium.Cartesian3.fromDegrees(lon, lat, h0), text: t.text, font: '13px sans-serif', fillColor: dwgColor(t.color), outlineColor: Cesium.Color.BLACK, outlineWidth: 2, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY, scale: 0.85 })
+          const fc = dwgColor(t.color)
+          const lab = labels.add({ position: Cesium.Cartesian3.fromDegrees(lon, lat, h0), text: t.text, font: '13px sans-serif', fillColor: fc, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY, scale: 0.85, distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, labelFar) })
+          labelRefs.push({ l: lab, f: fc, o: Cesium.Color.BLACK })
         }
         v.scene.primitives.add(labels)
       }
@@ -3296,7 +3323,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       const pts = lprims.filter((p): p is Extract<DrawPrim, { kind: 'point' }> => p.kind === 'point')
       if (pts.length) {
         points = new Cesium.PointPrimitiveCollection()
-        for (const pt of pts) { const [lon, lat] = toLL(pt.pt[0], pt.pt[1]); seen(lon, lat); points.add({ position: Cesium.Cartesian3.fromDegrees(lon, lat, h0), pixelSize: 5, color: dwgColor(pt.color), disableDepthTestDistance: Number.POSITIVE_INFINITY }) }
+        for (const pt of pts) { const [lon, lat] = toLL(pt.pt[0], pt.pt[1]); seen(lon, lat); const pc = dwgColor(pt.color); const pp = points.add({ position: Cesium.Cartesian3.fromDegrees(lon, lat, h0), pixelSize: 5, color: pc, disableDepthTestDistance: Number.POSITIVE_INFINITY }); pointRefs.push({ p: pp, c: pc }) }
         v.scene.primitives.add(points)
       }
 
@@ -3307,10 +3334,42 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     const id = `${Date.now()}`
     const pad = 0.0004
     const bounds = (elon > wlon && nlat > slat) ? Cesium.Rectangle.fromDegrees(wlon - pad, slat - pad, elon + pad, nlat + pad) : null
-    drawingsRef.current.set(id, { layers, bounds })
+    drawingsRef.current.set(id, { layers, bounds, up, labelRefs, pointRefs, polyRefs })
     upsertObj({ id: `drawing-${id}`, kind: 'drawing', name: `Výkres ${name}`, visible: true })
     console.log(`Výkres „${name}": ${parse.prims.length} prvků, umístění ${mode}`)
     if (bounds) v.camera.flyTo({ destination: bounds, duration: 1.2 })
+  }
+
+  // ── posun výšky + průhlednost celého výkresu (živě, bez překreslení) ──
+  function applyDrawH(e: DrawingEntry, off: number) {
+    const m = Cesium.Matrix4.fromTranslation(Cesium.Cartesian3.multiplyByScalar(e.up, off, new Cesium.Cartesian3()))
+    for (const ly of e.layers) {
+      if (ly.prim) ly.prim.modelMatrix = m
+      if (ly.labels) ly.labels.modelMatrix = m
+      if (ly.points) ly.points.modelMatrix = m
+    }
+  }
+  function applyDrawAlpha(e: DrawingEntry, a: number) {
+    for (const r of e.labelRefs) { r.l.fillColor = r.f.withAlpha(a); r.l.outlineColor = r.o.withAlpha(a) }
+    for (const r of e.pointRefs) r.p.color = r.c.withAlpha(a)
+    for (const r of e.polyRefs) { const at = r.prim.getGeometryInstanceAttributes(r.id); if (at) at.color = Cesium.ColorGeometryInstanceAttribute.toValue(r.c.withAlpha(a), at.color) }
+    viewerRef.current?.scene.requestRender()
+  }
+  function setDrawingHeight(did: string, off: number) { const e = drawingsRef.current.get(did); if (e) { applyDrawH(e, off); setDrawH(s => ({ ...s, [did]: off })) } }
+  function setDrawingAlpha(did: string, a: number) { const e = drawingsRef.current.get(did); if (e) { applyDrawAlpha(e, a); setDrawA(s => ({ ...s, [did]: a })) } }
+
+  // ── kamera: perspektiva ↔ pohled shora (ortho, jako půdorys) ──
+  function camPerspective() { const v = viewerRef.current; if (v && !v.isDestroyed()) v.scene.camera.switchToPerspectiveFrustum() }
+  function camTopOrtho() {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const g = viewCenterGround(v)
+    const h = Math.max(150, v.camera.positionCartographic?.height ?? 2000)
+    v.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(g.lon, g.lat, h),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 },
+      duration: 0.5,
+      complete: () => { if (!v.isDestroyed()) v.scene.camera.switchToOrthographicFrustum() },
+    })
   }
 
   // odletí kamerou na daný objekt (výkres / model / parcela)
@@ -3835,6 +3894,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         <button onClick={() => loadSplat()} disabled={splatLoading || splatOn} title="TEST: načíst Gaussian splat (Schillerova rozhledna, Kryry) z Cesium ion a posadit na mapu" className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-fuchsia-600 hover:bg-fuchsia-500 text-white transition-colors disabled:opacity-50">
           {splatLoading ? <Loader2 size={15} className="animate-spin" /> : <Box size={15} />} Splat (Kryry)
         </button>
+        <div className="flex items-center gap-1">
+          <button onClick={camPerspective} title="Perspektivní pohled (běžná 3D kamera)" className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"><Mountain size={15} /> Persp.</button>
+          <button onClick={camTopOrtho} title="Pohled shora (ortho — jako půdorys/plán)" className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"><MapIcon size={15} /> Shora</button>
+        </div>
         {cacheInfo.count > 0 && (
           <>
             <div className="h-px bg-gray-700 my-0.5" />
@@ -4205,6 +4268,16 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
               const bulk = selCount > 0 ? [...sel] : shownNames // očka pracují nad výběrem, jinak nad zobrazenými
               return (
               <div className="ml-5 mb-1 mt-0.5 flex flex-col gap-0.5 border-l border-gray-700 pl-2">
+                <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[10px] text-gray-400" onClick={e => e.stopPropagation()}>
+                  <span className="w-10 shrink-0">Výška</span>
+                  <input type="range" min={-100} max={100} step={0.5} value={drawH[did] ?? 0} onChange={e => setDrawingHeight(did, Number(e.target.value))} className="flex-1 min-w-0" />
+                  <span className="w-10 text-right tabular-nums shrink-0">{(drawH[did] ?? 0).toFixed(1)} m</span>
+                </div>
+                <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[10px] text-gray-400" onClick={e => e.stopPropagation()}>
+                  <span className="w-10 shrink-0">Průhled.</span>
+                  <input type="range" min={0.05} max={1} step={0.05} value={drawA[did] ?? 1} onChange={e => setDrawingAlpha(did, Number(e.target.value))} className="flex-1 min-w-0" />
+                  <span className="w-10 text-right tabular-nums shrink-0">{Math.round((drawA[did] ?? 1) * 100)} %</span>
+                </div>
                 <div className="flex items-center gap-1 px-1 pb-0.5">
                   <Search size={11} className="shrink-0 text-gray-500" />
                   <input

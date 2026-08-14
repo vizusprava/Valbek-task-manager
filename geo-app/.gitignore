@@ -13,3 +13,5 @@ local-tiles/
 # velké splat zdroje (.ply) — negitovat
 splat-src/
 *.ply
+*.dwg
+*.dxf
