@@ -5,9 +5,10 @@
  * volající si sám rozhodne, kam průběh zobrazí a jak se export zruší.
  */
 import { zipSync, strToU8 } from 'three/examples/jsm/libs/fflate.module.js'
-import { toast } from 'sonner'
+
 import { mapBboxUrl, pickTopoTier, fetchJpegRetry, pool, type MapLayer } from '../tiles'
 import { isAbortError } from '../config'
+import type { ExportCtx } from './ctx'
 import { download } from '../exportUtils'
 
 // Stahuje se po velkých blocích (ne po dlaždicích) → stylovaná topo mapa nemá ořezané popisky
@@ -55,7 +56,7 @@ export async function loadMapChunk(url: string, signal?: AbortSignal): Promise<I
 // jádro spojené 2D mapy (ortofoto + topo) přes zadanou S-JTSK obálku → zip s georef. obrázky (world file).
 // `clip` (S-JTSK prstence) = ořezat výstup přesně na ten tvar (průhledno kolem) → ortofoto pak jde
 // do PNG s alfou (JPEG průhlednost neumí), stejně jako výřez terénu. World file zůstává na obálce.
-export async function stitchMapsCore(minX: number, minY: number, maxX: number, maxY: number, signal: AbortSignal, report: (done: number, total: number, msg: string) => void, stitchMax: number, clip?: [number, number][][]) {
+export async function stitchMapsCore(minX: number, minY: number, maxX: number, maxY: number, stitchMax: number, ctx: ExportCtx, clip?: [number, number][][]): Promise<string> {
   const spanX = maxX - minX, spanY = maxY - minY
   const tier = pickTopoTier(Math.max(spanX, spanY))
   const clipMode = !!(clip && clip.length)
@@ -71,8 +72,8 @@ export async function stitchMapsCore(minX: number, minY: number, maxX: number, m
   const bounds = (len: number, n: number) => Array.from({ length: n + 1 }, (_, i) => Math.round(i * len / n))
 
   const canvas = document.createElement('canvas')
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas 2D kontext se nepodařilo získat')
+  const g = canvas.getContext('2d')
+  if (!g) throw new Error('Canvas 2D kontext se nepodařilo získat')
 
   const files: Record<string, Uint8Array | [Uint8Array, { level: number }]> = {}
   const toBytes = async (mime: string, quality?: number): Promise<Uint8Array> => {
@@ -96,7 +97,7 @@ export async function stitchMapsCore(minX: number, minY: number, maxX: number, m
 
   for (const { L, W, H, sc, nCols, nRows } of layerPlan) {
     canvas.width = W; canvas.height = H
-    ctx.clearRect(0, 0, W, H)
+    g.clearRect(0, 0, W, H)
     const cx = bounds(W, nCols), cy = bounds(H, nRows)
     const chunks: { c: number; r: number }[] = []
     for (let r = 0; r < nRows; r++) for (let c = 0; c < nCols; c++) chunks.push({ c, r })
@@ -106,27 +107,27 @@ export async function stitchMapsCore(minX: number, minY: number, maxX: number, m
       // blok v S-JTSK (pixelové hranice → poměrná část obálky); sever = horní okraj
       const bx0 = minX + spanX * cx[c] / W, bx1 = minX + spanX * cx[c + 1] / W
       const by1 = maxY - spanY * cy[r] / H, by0 = maxY - spanY * cy[r + 1] / H
-      const bmp = await loadMapChunk(mapBboxUrl(bx0, by0, bx1, by1, pxW, pxH, L.layer, tier), signal)
+      const bmp = await loadMapChunk(mapBboxUrl(bx0, by0, bx1, by1, pxW, pxH, L.layer, tier), ctx.signal)
       done++
-      report(done, total, `mapa ${done}/${total}`)
+      ctx.report(done / total, `mapa ${done}/${total}`)
       return { c, r, bmp, pxW, pxH }
     })
-    for (const { c, r, bmp, pxW, pxH } of imgs) { ctx.drawImage(bmp, cx[c], cy[r], pxW, pxH); bmp.close?.() }
+    for (const { c, r, bmp, pxW, pxH } of imgs) { g.drawImage(bmp, cx[c], cy[r], pxW, pxH); bmp.close?.() }
     if (clipMode) {
       // ořez na tvar: nakresli polygon(y) území a nech jen to, co je uvnitř (zbytek průhledný)
-      ctx.save()
-      ctx.globalCompositeOperation = 'destination-in'
-      ctx.beginPath()
+      g.save()
+      g.globalCompositeOperation = 'destination-in'
+      g.beginPath()
       for (const ring of clip!) {
         ring.forEach(([x, y], k) => {
           const px = (x - minX) / spanX * W, py = (maxY - y) / spanY * H
-          if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
+          if (k === 0) g.moveTo(px, py); else g.lineTo(px, py)
         })
-        ctx.closePath()
+        g.closePath()
       }
-      ctx.fillStyle = '#000'
-      ctx.fill('evenodd') // even-odd zvládne i díry / více oddělených částí území
-      ctx.restore()
+      g.fillStyle = '#000'
+      g.fill('evenodd') // even-odd zvládne i díry / více oddělených částí území
+      g.restore()
     }
     files[L.file] = [await toBytes(L.mime, L.q), { level: 0 }] // obrázky už komprimované
     // world file (na vlastní rozměr vrstvy): pixel → S-JTSK, levý-horní pixel = SZ roh
@@ -158,9 +159,8 @@ export async function stitchMapsCore(minX: number, minY: number, maxX: number, m
 
   const zipped = zipSync(files as Parameters<typeof zipSync>[0], { level: 6 })
   download(zipped, `mapa_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
-  toast.success(`Spojená mapa: ortofoto ${o.W}×${o.H} px + topo ${tp.W}×${tp.H} px`)
+  return `Spojená mapa: ortofoto ${o.W}×${o.H} px + topo ${tp.W}×${tp.H} px`
 }
-
 
 /** Ortofoto pro obálku jako JPEG. Nad 4096 px se skládá po blocích — ČÚZK víc naráz nedá. */
 export async function fetchOrthoTexture(minX: number, minY: number, maxX: number, maxY: number, longPx: number, signal: AbortSignal, report: (msg: string) => void): Promise<Uint8Array> {

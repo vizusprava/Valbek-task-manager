@@ -4,16 +4,13 @@ import 'cesium/Build/Cesium/Widgets/widgets.css'
 import * as THREE from 'three'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
-import { Zip, ZipDeflate, ZipPassThrough, zipSync, strToU8 } from 'three/examples/jsm/libs/fflate.module.js'
+import { zipSync } from 'three/examples/jsm/libs/fflate.module.js'
 import {
   TILE_SIZES, MESH_STEPS, MESH_STEP_DEFAULT, TEX_SIZES, type TileSize, type MeshStep, type TexSize,
-  type Tile, type Offset, tileKey, tileName, tileAt, tilesBounds, tileRingLL, wgsOf, sjtskOf,
-  pool, fetchTileHeights, fetchTileOrtho, buildTileObj, buildMtl, buildMaxScript, buildMaxScriptFiles, medianHeight,
-  gridSize, stepOf, concatBytes, estimateObjBytes,
+  type Tile, tileKey, tileAt, tileRingLL, wgsOf, sjtskOf, pool, gridSize, estimateObjBytes,
 } from './tiles'
 import { cacheStats, cacheClear, bakedGet, bakedPut, bakedAllKeys, bakedClear } from './cache'
 import { fetchOrthoUrl, orthoExport4326Url } from './orthoTiles'
-import { BUILDING_MTL } from './buildings'
 import { solveSimilarity, type V3 } from './similarity'
 import { dxfToPrims, type DrawParse, type DrawPrim } from './dxf'
 import { buildTextPrims } from './dxfText'
@@ -22,7 +19,6 @@ import { CalloutLayer, DOT_DEFAULT, FRAME_DEFAULT, SIZE_DEFAULT, type Callout } 
 import { PulseLayer, PULSE_COLOR_DEFAULT, PULSE_COUNT_DEFAULT, type PulseSet } from './pulse'
 import { applyBackground, BG_MODES, type BgMode } from './background'
 import proj4 from 'proj4'
-import cdt2d from 'cdt2d'
 import polygonClipping from 'polygon-clipping'
 import { toast } from 'sonner'
 import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload, Move, Crosshair, Trash2, ArrowDownToLine, RotateCcw, MapPin, Mountain, Download, Eye, EyeOff, Hexagon, Check, Sparkles, Grid3x3, X, ChevronRight, ChevronLeft, ChevronDown, Landmark, Camera, Play, Ruler } from 'lucide-react'
@@ -37,16 +33,20 @@ import type {
 } from './types'
 import { CachedWmsOrtho, WMS_TILE, LOCAL_TILES, bakedKeys, ortofotoProvider, ZTM_TIERS, ztmProvider, pickZtmTier, katastrProvider } from './imagery'
 import { makeDmrTerrain } from './terrain'
-import { fetchElevSampler, fetchElevSamplerSJTSK } from './elevation'
+import { fetchElevSampler } from './elevation'
 import { simplifyRingCapped, pointInRing, ringCentroid } from './rings'
 import { MEASURE_MAX_EDGES, MEASURE_MIN_EDGE, measureRing, fmtArea, type ParcelMeasure } from './measure'
 import { ruianQuery, fetchAdminUnits, fetchAdminParts, fetchAdminGeom, fetchParcelAt, fetchParcelsInBbox, type AdminUnit } from './katastr'
 import { AURORA_HEIGHT_M, AURORA_LABEL_LIFT_M, AURORA_SINK_M, auroraMaterial, smoothClosedRing, fetchLiberecDistricts } from './districts'
 import { pickGround, pickTerrain, viewCenterGround, buildMatrix } from './sceneUtils'
-import { getGltfLoader, glbBin, gltfImage, textureImageIndex, computeBottomZ, georeferenceSjtskGlb, type GltfJson, type GltfParser } from './model3d'
-import { parseAnchor, download, anchorFilename, buildDxf, buildDxfLayers, buildingsObjChunk } from './exportUtils'
-import { fetchKatastrPolylines, fetchKatastrDxf } from './export/katastrDxf'
-import { stitchMapsCore, fetchOrthoTexture } from './export/maps'
+import { computeBottomZ, georeferenceSjtskGlb } from './model3d'
+import { parseAnchor, download, anchorFilename, buildDxf, buildDxfLayers } from './exportUtils'
+import { fetchKatastrPolylines } from './export/katastrDxf'
+import { stitchMapsCore } from './export/maps'
+import type { ExportCtx } from './export/ctx'
+import { exportTilesObj as exportTilesObjCore } from './export/tilesObj'
+import { exportCutout as exportCutoutCore } from './export/cutout'
+import { exportGoogleMesh as exportGoogleMeshCore, type GoogleTile } from './export/googleMesh'
 import { NumRow, Section, ToggleBtn } from './ui'
 
 export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
@@ -1249,156 +1249,37 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gridOn, tileSize])
 
-  /**
-   * Vyveze vybrané dlaždice jako zip: teren.obj + teren.mtl + JPEG na dlaždici.
-   * Každá dlaždice = vlastní objekt s vlastním materiálem, souřadnice v rovině S-JTSK
-   * mínus zadaný posun (viz buildTileObj). 3ds Max importuje OBJ nativně i s texturami.
-   */
-  async function exportTilesObj() {
-    const tiles = [...tilesRef.current.values()].map(t => t.tile)
-    if (!tiles.length || tileBusy) return
+  // ── dlouhé exporty: jeden ukazatel průběhu, jedno zrušení, jedno místo na chyby ────────────
+  // Vlastní práci dělají moduly v `export/` — ty stav komponenty neznají a dostanou jen `ExportCtx`
+  // (signál zrušení + hlášení průběhu) a vrátí hlášku pro úspěšný toast. Tady zůstala jen obsluha:
+  // zamknout tlačítka, nastavit ukazatel, přeložit chybu na toast a po sobě uklidit. Dřív měl tuhle
+  // pětiřádkovou obálku každý export vlastní (a každý o kousek jinak).
+  type ExportUi = { busy: boolean; setBusy: (b: boolean) => void; setPct: (p: number) => void; setMsg: (m: string) => void }
+  const tileUi: ExportUi = { busy: tileBusy, setBusy: setTileBusy, setPct: setTilePct, setMsg: setTileProgress }
+  const cutoutUi: ExportUi = { busy: cutoutBusy, setBusy: setCutoutBusy, setPct: setCutoutPct, setMsg: setCutoutProgress }
+
+  async function runExport(ui: ExportUi, failMsg: string, job: (ctx: ExportCtx) => Promise<string>) {
+    if (ui.busy) return
     const ac = new AbortController()
     abortRef.current = ac
-    setTileBusy(true)
-    setTilePct(0)
-    setTileProgress(`0/${tiles.length}`)
+    ui.setBusy(true); ui.setPct(-1); ui.setMsg('připravuji…')
     try {
-      let done = 0
-      const fetched = await pool(tiles, 3, async tile => {
-        const [grid, jpg] = await Promise.all([fetchTileHeights(tile, meshStep, ac.signal), fetchTileOrtho(tile, texSize, ac.signal)])
-        done++
-        setTilePct(done / tiles.length)
-        setTileProgress(`${done}/${tiles.length}`)
-        return { tile, grid, jpg }
-      })
-      setTilePct(-1)
-      setTileProgress('skládám…')
-      await new Promise(r => setTimeout(r, 30)) // ať se stihne překreslit UI před blokující prací
-
-      const fallbackH = medianHeight(fetched.map(f => f.grid))
-      const { minX, minY, maxX, maxY } = tilesBounds(tiles)
-      // Žádný posun: vrcholy jdou ven v reálných S-JTSK souřadnicích, ať sedí na ostatní data v Maxu.
-      const off: Offset = { x: 0, y: 0, z: 0 }
-
-      // Zip se skládá STREAMOVANĚ, po dlaždicích. Celý OBJ jako jeden řetězec nejde: u ~50 dlaždic
-      // přeteče strop V8 na délku stringu (~512 MB) a join spadne na „Invalid string length".
-      // Takhle se v paměti nikdy nedrží víc než jedna dlaždice + zkomprimovaný výstup.
-      const chunks: Uint8Array[] = []
-      let zipErr: unknown = null
-      const zip = new Zip((err, dat) => { if (err) zipErr = err; else if (dat) chunks.push(dat) })
-      const check = () => { if (zipErr) throw zipErr instanceof Error ? zipErr : new Error(String(zipErr)) }
-
-      const objF = new ZipDeflate('teren.obj', { level: 1 })
-      zip.add(objF)
-      objF.push(strToU8('mtllib teren.mtl\n'), false)
-      let vBase = 1
-      let built = 0
-      for (const f of fetched) {
-        if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
-        objF.push(strToU8(buildTileObj(f.tile, f.grid, off, fallbackH, vBase) + '\n'), false)
-        vBase += f.grid.n * f.grid.n
-        check()
-        if (++built % 5 === 0 || built === fetched.length) {
-          setTilePct(built / fetched.length)
-          setTileProgress(`skládám ${built}/${fetched.length}`)
-          await new Promise(r => setTimeout(r, 0)) // pustit UI k slovu
-        }
-      }
-      // volitelně: budovy ČÚZK (výška i tvar střechy z DMR5G/DMP1G) jako samostatný objekt „budovy"
-      let buildingsLine = 'Budovy: ne'
-      let hasBuildings = false
-      if (exportBuildings) {
-        setTilePct(-1)
-        setTileProgress('budovy…')
-        try {
-          const bch = await buildingsObjChunk(minX, minY, maxX, maxY, vBase, ac.signal)
-          if (bch.obj) { objF.push(strToU8(bch.obj), false); check(); vBase += bch.vCount; hasBuildings = true }
-          buildingsLine = bch.line
-        } catch (e) {
-          if (isAbortError(e)) throw e
-          console.error('Budovy do exportu selhaly:', e); buildingsLine = 'Budovy: stažení selhalo (viz konzole)'
-        }
-      }
-      objF.push(new Uint8Array(0), true)
-      check()
-
-      for (const f of fetched) {
-        const jf = new ZipPassThrough(`${tileName(f.tile)}.jpg`) // JPEG už komprimovaný je
-        zip.add(jf)
-        jf.push(f.jpg, true)
-        check()
-      }
-
-      const addText = (name: string, text: string) => {
-        const d = new ZipDeflate(name, { level: 6 })
-        zip.add(d)
-        d.push(strToU8(text), true)
-        check()
-      }
-      addText('teren.mtl', buildMtl(tiles) + (hasBuildings ? '\n' + BUILDING_MTL : ''))
-      addText('vray_material.ms', buildMaxScript(tiles))
-
-      // volitelně: hranice parcel (katastr) jako DXF křivky v témže S-JTSK rámci
-      let katastrLine = 'Katastr: ne'
-      if (exportKatastr) {
-        setTilePct(-1)
-        setTileProgress('katastr…')
-        try {
-          const k = await fetchKatastrDxf(minX, minY, maxX, maxY)
-          if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
-          if (k) { addText('katastr.dxf', k.dxf); katastrLine = `Katastr: katastr.dxf (${k.count} parcel, hranice jako 3D křivky)` }
-          else katastrLine = 'Katastr: v oblasti nenalezeny žádné parcely'
-        } catch (e) {
-          if (isAbortError(e)) throw e
-          console.error('Katastr do exportu selhal:', e); katastrLine = 'Katastr: stažení selhalo (viz konzole)'
-        }
-      }
-
-      addText('info.txt', [
-        'Terén DMR 5G + ortofoto (ČÚZK)',
-        '',
-        'Souřadnice: REÁLNÉ S-JTSK / Křovák East North (EPSG:5514), výšky Bpv.',
-        'Žádný posun — vrcholy jsou na skutečných souřadnicích, tak jak leží.',
-        '',
-        'Import do 3ds Max:',
-        '  1) File > Import > teren.obj (textury natáhne teren.mtl)',
-        '  2) Chceš-li V-Ray: označ dlaždice (nebo neoznač nic — najde si je sám)',
-        '     a spusť Scripting > Run Script > vray_material.ms',
-        '     → označeným objektům vymění materiál za VRayMtl s ortofotem v diffuse.',
-        '     (VRayMtl nejde uložit do .mtl — Wavefront formát renderery nezná.)',
-        '  Rozbal celý zip do JEDNÉ složky, MTL i skript hledají JPEGy vedle sebe.',
-        '',
-        `Rozsah: X ${minX} … ${maxX}, Y ${minY} … ${maxY}`,
-        '',
-        `Dlaždic: ${tiles.length} × ${tileSize} m`,
-        `Mřížka terénu: ${stepOf(tiles[0], fetched[0].grid.n).toFixed(3)} m (zdrojový DMR 5G má body po ~2,8 m)`,
-        `Textura: ${texSize} px na dlaždici = ${(tileSize / texSize * 100).toFixed(1)} cm/px (ortofoto ČÚZK má nativně 20 cm/px)`,
-        katastrLine,
-        buildingsLine,
-        'Budovy (je-li): objekt „budovy" = půdorysy ČÚZK, výška z DMP1G−DMR5G, střecha',
-        'rozpoznaná (plochá/sedlová/valbová) jako čistá low-poly hmota, hnědý materiál bez textury.',
-        'Y je mřížkový sever Křováku, ne pravý sever (meridiánová konvergence ~7°).',
-        '',
-        'katastr.dxf (je-li): hranice parcel jako uzavřené 3D křivky (DXF R12), stejný S-JTSK',
-        'rámec i výšky jako terén → v Maxu lícuje. Import: File > Import > katastr.dxf.',
-        '',
-        `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
-      ].join('\n'))
-
-      zip.end()
-      check()
-      download(concatBytes(chunks), `teren_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
-      toast.success(`Vyvezeno ${tiles.length}× dlaždice ${tileSize} m s ortofotem`)
+      toast.success(await job({ signal: ac.signal, report: (pct, msg) => { ui.setPct(pct); ui.setMsg(msg) } }))
     } catch (e) {
       if (isAbortError(e)) { toast.info('Export zrušen'); return }
-      console.error('Export dlaždic selhal:', e)
-      toast.error(e instanceof Error ? e.message : 'Export dlaždic selhal')
+      console.error(`${failMsg}:`, e)
+      toast.error(e instanceof Error ? e.message : failMsg)
     } finally {
       abortRef.current = null
-      setTileBusy(false)
-      setTileProgress('')
-      setTilePct(-1)
+      ui.setBusy(false); ui.setMsg(''); ui.setPct(-1)
     }
+  }
+
+  async function exportTilesObj() {
+    const tiles = [...tilesRef.current.values()].map(t => t.tile)
+    if (!tiles.length) return
+    await runExport(tileUi, 'Export dlaždic selhal', ctx =>
+      exportTilesObjCore(tiles, { tileSize, meshStep, texSize, buildings: exportBuildings, katastr: exportKatastr }, ctx))
   }
 
 
@@ -1610,53 +1491,22 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
 
   async function exportStitchedMaps() {
     const tiles = [...tilesRef.current.values()].map(t => t.tile)
-    if (!tiles.length || tileBusy) return
-    const ac = new AbortController()
-    abortRef.current = ac
-    setTileBusy(true)
-    setTilePct(0)
-    setTileProgress('mapa…')
-    try {
-      // S-JTSK obálka výběru (dlaždice jsou souvislé čtverce)
-      let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity
-      for (const t of tiles) { ix0 = Math.min(ix0, t.ix); ix1 = Math.max(ix1, t.ix); iy0 = Math.min(iy0, t.iy); iy1 = Math.max(iy1, t.iy) }
-      const minX = ix0 * tileSize, maxX = (ix1 + 1) * tileSize
-      const minY = iy0 * tileSize, maxY = (iy1 + 1) * tileSize
-      await stitchMapsCore(minX, minY, maxX, maxY, ac.signal, (d, t, m) => { setTilePct(d / t); setTileProgress(m) }, stitchMax)
-    } catch (e) {
-      if (isAbortError(e)) { toast.info('Export zrušen'); return }
-      console.error('Export spojené mapy selhal:', e)
-      toast.error(e instanceof Error ? e.message : 'Export mapy selhal')
-    } finally {
-      abortRef.current = null
-      setTileBusy(false)
-      setTileProgress('')
-      setTilePct(-1)
-    }
+    if (!tiles.length) return
+    // S-JTSK obálka výběru (dlaždice jsou souvislé čtverce)
+    let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity
+    for (const t of tiles) { ix0 = Math.min(ix0, t.ix); ix1 = Math.max(ix1, t.ix); iy0 = Math.min(iy0, t.iy); iy1 = Math.max(iy1, t.iy) }
+    await runExport(tileUi, 'Export mapy selhal', ctx =>
+      stitchMapsCore(ix0 * tileSize, iy0 * tileSize, (ix1 + 1) * tileSize, (iy1 + 1) * tileSize, stitchMax, ctx))
   }
-
 
   // spojená 2D mapa (ortofoto + topo) pro vybrané správní území — přes obálku území
   async function exportRegionMaps() {
     const a = regionActiveRef.current
-    if (!a || cutoutBusy) { if (!a) toast.error('Nejdřív vyber a zobraz území'); return }
-    const ac = new AbortController(); abortRef.current = ac
-    setCutoutBusy(true); setCutoutPct(0); setCutoutProgress('mapa…')
-    try {
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
-      for (const r of a.sjtskRings) for (const [x, y] of r) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y }
-      // ořez přesně na tvar území (jako výřez terénu) → PNG s alfou, okolí průhledné
-      await stitchMapsCore(minX, minY, maxX, maxY, ac.signal, (d, t, m) => { setCutoutPct(d / t); setCutoutProgress(m) }, stitchMax, a.sjtskRings)
-    } catch (e) {
-      if (isAbortError(e)) { toast.info('Export zrušen'); return }
-      console.error('Export mapy území selhal:', e)
-      toast.error(e instanceof Error ? e.message : 'Export mapy selhal')
-    } finally {
-      abortRef.current = null
-      setCutoutBusy(false)
-      setCutoutProgress('')
-      setCutoutPct(-1)
-    }
+    if (!a) { toast.error('Nejdřív vyber a zobraz území'); return }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const r of a.sjtskRings) for (const [x, y] of r) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y }
+    // ořez přesně na tvar území (jako výřez terénu) → PNG s alfou, okolí průhledné
+    await runExport(cutoutUi, 'Export mapy selhal', ctx => stitchMapsCore(minX, minY, maxX, maxY, stitchMax, ctx, a.sjtskRings))
   }
 
   // městské části Liberce (k.ú.) jako „polární záře" stoupající od terénu, každá vlastní barva; zap/vyp
@@ -2032,22 +1882,18 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }
   }
 
-  /**
-   * Výřez podle katastru jako export STEJNÝ jako dlaždice: čistý terén DMR 5G + zapečené ortofoto,
-   * jen ořezaný na hranici vybraných parcel/oblasti (ne celé čtverce). Zip: vyrez.obj + vyrez.mtl +
-   * vyrez.jpg + vray_material.ms + info.txt. Souřadnice v REÁLNÉM S-JTSK (EPSG:5514), bez posunu,
-   * výšky Bpv → lícuje s exportem dlaždic i s modely z Maxu. UV se berou z polohy v bboxu výřezu,
-   * takže jedno ortofoto přes celý výběr sedí na terén 1:1.
-   */
-  // ortofoto textura pro výřez: do 4096 px jeden požadavek, jinak složí z ≤4096 dlaždic (ostřejší)
-  async function exportParcelCutout() {
-    if (parcelsRef.current.size === 0) { toast.error('Nejdřív vyber parcelu'); return }
-    const polys = [...parcelsRef.current.values()].map(p => {
+  /** obrysy vybraných parcel jako uzavřené lon/lat polygony (vstup pro výřez i Google mesh) */
+  function parcelPolys(): [number, number][][][] {
+    return [...parcelsRef.current.values()].map(p => {
       const r = p.ring.map(([lo, la]) => [lo, la] as [number, number])
       if (r.length && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) r.push([r[0][0], r[0][1]])
       return [r] as [number, number][][]
     })
-    await exportCutout(polys)
+  }
+
+  async function exportParcelCutout() {
+    if (parcelsRef.current.size === 0) { toast.error('Nejdřív vyber parcelu'); return }
+    await runExport(cutoutUi, 'Export výřezu selhal', ctx => exportCutoutCore(parcelPolys(), meshStep, ctx))
   }
 
   // export terénu (DMR 5G) + zapečené ortofoto ořezaný na vybrané správní území
@@ -2059,200 +1905,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       if (ll.length && (ll[0][0] !== ll[ll.length - 1][0] || ll[0][1] !== ll[ll.length - 1][1])) ll.push([ll[0][0], ll[0][1]])
       return [ll] as [number, number][][]
     })
-    await exportCutout(polys)
-  }
-
-  // Jádro výřezu: DMR 5G + zapečené ortofoto ořezané na zadané polygony (lon/lat). Sdílené pro parcely
-  // i území. Zip: vyrez.obj + mtl + jpg + V-Ray + info; reálné S-JTSK (EPSG:5514), výšky Bpv.
-  async function exportCutout(polys: [number, number][][][]) {
-    if (cutoutBusy) return
-    const ac = new AbortController()
-    abortRef.current = ac
-    setCutoutBusy(true)
-    setCutoutPct(-1)
-    setCutoutProgress('připravuji…')
-    try {
-      let merged: [number, number][][][]
-      try { merged = polygonClipping.union(polys[0], ...polys.slice(1)) as [number, number][][][] }
-      catch (e) { console.error('Union polygonů selhal, padám na jednotlivé:', e); merged = polys }
-
-      // 2) převod na S-JTSK + odstranění uzavíracího bodu + bbox celého výběru
-      const cleanRing = (r: number[][]) => {
-        const c = r.slice()
-        if (c.length > 1) { const a = c[0], b = c[c.length - 1]; if (Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6) c.pop() }
-        return c
-      }
-      const patches: { outer: number[][]; holes: number[][][] }[] = []
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-      for (const poly of merged) {
-        const outer = cleanRing(poly[0].map(([lo, la]) => sjtskOf(lo, la) as number[]))
-        if (outer.length < 3) continue
-        const holes = poly.slice(1).map(h => cleanRing(h.map(([lo, la]) => sjtskOf(lo, la) as number[]))).filter(h => h.length >= 3)
-        for (const [x, y] of outer) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y) }
-        patches.push({ outer, holes })
-      }
-      if (!patches.length) throw new Error('Výběr nemá platnou plochu')
-      const spanX = maxX - minX, spanY = maxY - minY
-      if (!(spanX > 0) || !(spanY > 0)) throw new Error('Výběr má nulovou plochu')
-      const longSpan = Math.max(spanX, spanY)
-
-      // 3) výšky DMR přes bbox (S-JTSK) — ~2 m/px, strop 2048 na delší stranu
-      setCutoutProgress('stahuji výšky (DMR)…')
-      const demLong = Math.min(2048, Math.max(64, Math.ceil(longSpan / 2)))
-      const demW = Math.max(2, Math.round(demLong * spanX / longSpan))
-      const demH = Math.max(2, Math.round(demLong * spanY / longSpan))
-      const sampler = await fetchElevSamplerSJTSK('dmr5g', minX, minY, maxX, maxY, demW, demH, ac.signal)
-
-      // 4) ortofoto jako textura — míří na nativních 20 cm/px, strop 8192 px na delší stranu;
-      //    nad 4096 px se skládá z dlaždic (ČÚZK dá max 4096 px na jeden požadavek)
-      setCutoutProgress('stahuji ortofoto…')
-      const texLong = Math.min(8192, Math.max(1024, Math.ceil(longSpan / 0.2)))
-      const texW = Math.max(1, Math.round(texLong * spanX / longSpan))
-      const texH = Math.max(1, Math.round(texLong * spanY / longSpan))
-      const jpg = await fetchOrthoTexture(minX, minY, maxX, maxY, texLong, ac.signal, setCutoutProgress)
-
-      // 5) triangulace každého výseku v S-JTSK, ořez hranicí, UV z polohy v bboxu
-      setCutoutProgress('skládám…')
-      const spacing = Math.max(meshStep, longSpan / 300) // hustota jako dlaždice, ale strop na velkou plochu
-
-      // OBJ text jednoho výseku (v/vt/f) s globálním offsetem indexů vBase; null = žádná plocha
-      const buildPatch = (sp: { outer: number[][]; holes: number[][][] }, vBase: number): { text: string; nv: number; nf: number } | null => {
-        // body + constrained hrany: obrys i díry jako zhuštěné uzavřené smyčky
-        const pts: number[][] = []
-        const edges: number[][] = []
-        const addLoop = (r: number[][]) => {
-          const start = pts.length
-          for (let i = 0; i < r.length; i++) {
-            const a = r[i], b = r[(i + 1) % r.length]
-            const nseg = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / spacing))
-            for (let k = 0; k < nseg; k++) { const t = k / nseg; pts.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]) }
-          }
-          const end = pts.length
-          for (let i = start; i < end; i++) edges.push([i, i + 1 < end ? i + 1 : start])
-        }
-        addLoop(sp.outer)
-        for (const h of sp.holes) addLoop(h)
-
-        // vnitřní body na mřížce (bbox výseku): uvnitř obrysu a mimo díry
-        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
-        for (const [x, y] of sp.outer) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
-        for (let y = y0 + spacing * 0.5; y < y1; y += spacing)
-          for (let x = x0 + spacing * 0.5; x < x1; x += spacing)
-            if (pointInRing(x, y, sp.outer) && !sp.holes.some(h => pointInRing(x, y, h))) pts.push([x, y])
-
-        // výšky Bpv (bez geoidu) + medián jako náhrada za díry v DMR
-        const heights = pts.map(([x, y]) => { const e = sampler(x, y); return e != null ? e : NaN })
-        const valid = heights.filter(h => Number.isFinite(h)) as number[]
-        if (!valid.length) return null
-        const fallback = valid.slice().sort((a, b) => a - b)[Math.floor(valid.length / 2)]
-
-        const tris = cdt2d(pts, edges, { exterior: false })
-        if (!tris.length) return null
-
-        const L: string[] = []
-        for (let i = 0; i < pts.length; i++) {
-          const z = Number.isFinite(heights[i]) ? (heights[i] as number) : fallback
-          L.push(`v ${pts[i][0].toFixed(3)} ${pts[i][1].toFixed(3)} ${z.toFixed(3)}`)
-        }
-        // vt: poloha v bboxu → sedí na jpg (sever = maxY = horní okraj obrázku = v 1)
-        for (let i = 0; i < pts.length; i++)
-          L.push(`vt ${((pts[i][0] - minX) / spanX).toFixed(6)} ${((pts[i][1] - minY) / spanY).toFixed(6)}`)
-        // f: jen trojúhelníky se středem uvnitř obrysu a mimo díry; vinutí CCW → normála +Z
-        let nf = 0
-        for (const t of tris) {
-          const cx = (pts[t[0]][0] + pts[t[1]][0] + pts[t[2]][0]) / 3
-          const cy = (pts[t[0]][1] + pts[t[1]][1] + pts[t[2]][1]) / 3
-          if (!pointInRing(cx, cy, sp.outer)) continue
-          if (sp.holes.some(h => pointInRing(cx, cy, h))) continue
-          let i0 = t[0], i1 = t[1], i2 = t[2]
-          const area = (pts[i1][0] - pts[i0][0]) * (pts[i2][1] - pts[i0][1]) - (pts[i2][0] - pts[i0][0]) * (pts[i1][1] - pts[i0][1])
-          if (area < 0) { const tmp = i1; i1 = i2; i2 = tmp } // otoč na CCW (lícem nahoru, +Z)
-          const a = vBase + i0, b = vBase + i1, c = vBase + i2
-          L.push(`f ${a}/${a} ${b}/${b} ${c}/${c}`)
-          nf++
-        }
-        if (!nf) return null
-        return { text: L.join('\n'), nv: pts.length, nf }
-      }
-
-      // 6) streamovaný zip (jako u dlaždic — velký výběr by jinak přetekl strop délky stringu)
-      const chunks: Uint8Array[] = []
-      let zipErr: unknown = null
-      const zip = new Zip((err, dat) => { if (err) zipErr = err; else if (dat) chunks.push(dat) })
-      const check = () => { if (zipErr) throw zipErr instanceof Error ? zipErr : new Error(String(zipErr)) }
-
-      const objF = new ZipDeflate('vyrez.obj', { level: 1 })
-      zip.add(objF)
-      objF.push(strToU8('mtllib vyrez.mtl\no vyrez\ng vyrez\nusemtl vyrez\n'), false)
-      let vBase = 1
-      let built = 0
-      let totalTris = 0
-      for (const sp of patches) {
-        if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
-        const part = buildPatch(sp, vBase)
-        if (part) {
-          objF.push(strToU8(part.text + '\n'), false)
-          vBase += part.nv
-          totalTris += part.nf
-          check()
-        }
-        setCutoutPct(++built / patches.length)
-        setCutoutProgress(`skládám ${built}/${patches.length}`)
-        await new Promise(r => setTimeout(r, 0))
-      }
-      objF.push(new Uint8Array(0), true)
-      check()
-      if (vBase === 1) throw new Error('Z výběru nevznikla žádná plocha (chybí DMR data?)')
-
-      const jf = new ZipPassThrough('vyrez.jpg')
-      zip.add(jf); jf.push(jpg, true); check()
-
-      const addText = (name: string, text: string) => { const d = new ZipDeflate(name, { level: 6 }); zip.add(d); d.push(strToU8(text), true); check() }
-      addText('vyrez.mtl', ['newmtl vyrez', 'Ka 0.000 0.000 0.000', 'Kd 1.000 1.000 1.000', 'Ks 0.000 0.000 0.000', 'd 1.0', 'illum 1', 'map_Kd vyrez.jpg', ''].join('\n'))
-      addText('vray_material.ms', buildMaxScriptFiles(['vyrez.jpg']))
-      addText('info.txt', [
-        'Teren DMR 5G + ortofoto (CUZK) — VYREZ podle hranic katastru',
-        '',
-        'Souřadnice: REÁLNÉ S-JTSK / Křovák East North (EPSG:5514), výšky Bpv.',
-        'Žádný posun — vrcholy jsou na skutečných souřadnicích (lícuje s exportem dlaždic).',
-        'Terén je ořezaný přesně na hranici vybraných parcel/oblasti (ne celé čtverce).',
-        '',
-        'Import do 3ds Max:',
-        '  1) File > Import > vyrez.obj (texturu natáhne vyrez.mtl)',
-        '  2) Chceš-li V-Ray: spusť Scripting > Run Script > vray_material.ms',
-        '  Rozbal celý zip do JEDNÉ složky, MTL i skript hledají vyrez.jpg vedle sebe.',
-        '',
-        `Rozsah bbox: X ${Math.round(minX)} … ${Math.round(maxX)}, Y ${Math.round(minY)} … ${Math.round(maxY)}`,
-        `Plocha bboxu: ${spanX.toFixed(0)} × ${spanY.toFixed(0)} m`,
-        `Mřížka terénu: ~${spacing.toFixed(2)} m (zdrojový DMR 5G má body po ~2,8 m)`,
-        `Textura: ${texW} × ${texH} px = ${(spanX / texW * 100).toFixed(1)} cm/px (ortofoto ČÚZK má nativně 20 cm/px)`,
-        `Trojúhelníků: ~${totalTris}`,
-        'Y je mřížkový sever Křováku, ne pravý sever (meridiánová konvergence ~7°).',
-        '',
-        `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
-      ].join('\n'))
-
-      zip.end()
-      check()
-      download(concatBytes(chunks), `vyrez_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
-      toast.success(`Vyvezen výřez (${patches.length} ${patches.length === 1 ? 'plocha' : 'ploch'}) s ortofotem`)
-    } catch (e) {
-      if (isAbortError(e)) { toast.info('Export zrušen'); return }
-      console.error('Export výřezu selhal:', e)
-      toast.error(e instanceof Error ? e.message : 'Export výřezu selhal')
-    } finally {
-      abortRef.current = null
-      setCutoutBusy(false)
-      setCutoutProgress('')
-      setCutoutPct(-1)
-    }
+    await runExport(cutoutUi, 'Export výřezu selhal', ctx => exportCutoutCore(polys, meshStep, ctx))
   }
 
   /**
-   * REFERENČNÍ export meshe z Google 3D dlaždic pro vybranou oblast (parcely). Vytáhne geometrii
-   * z aktuálně vykreslených dlaždic (`_selectedTiles`), přetransformuje do reálného S-JTSK (lícuje
-   * s exportem terénu) a ořízne na hranici výběru. Bez textur (jen geometrie jako reference výšek/tvarů).
-   * POZOR: Google Photorealistic 3D Tiles mají v licenci omezení na odvozené modely — jen interní reference.
+   * Google mesh vybrané oblasti — geometrie se bere z právě vykreslených dlaždic, takže co není
+   * na obrazovce načtené, to v exportu nebude. Odtud ty kontroly před spuštěním.
    */
   async function exportGoogleMesh() {
     const v = viewerRef.current
@@ -2260,182 +1918,9 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     if (!v || v.isDestroyed()) return
     if (base !== 'google' || !ts) { toast.error('Nejdřív zapni „3D realita (Google)" a najeď kamerou na oblast'); return }
     if (parcelsRef.current.size === 0) { toast.error('Vyber parcelu/oblast pro ořez'); return }
-    const tiles = (ts as unknown as { _selectedTiles: Array<{ _contentResource?: Cesium.Resource; content?: unknown; computedTransform: Cesium.Matrix4 }> })._selectedTiles
+    const tiles = (ts as unknown as { _selectedTiles: GoogleTile[] })._selectedTiles
     if (!tiles || !tiles.length) { toast.error('Google dlaždice ještě nejsou vykreslené — počkej, až se scéna dokreslí'); return }
-    if (cutoutBusy) return
-    const ac = new AbortController(); abortRef.current = ac
-    setCutoutBusy(true); setCutoutPct(-1); setCutoutProgress('připravuji…')
-    try {
-      // 1) výběr → S-JTSK obrysy + bbox (stejná konvence jako výřez terénu, aby to lícovalo)
-      const polys = [...parcelsRef.current.values()].map(p => {
-        const r = p.ring.map(([lo, la]) => [lo, la] as [number, number])
-        if (r.length && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) r.push([r[0][0], r[0][1]])
-        return [r] as [number, number][][]
-      })
-      let merged: [number, number][][][]
-      try { merged = polygonClipping.union(polys[0], ...polys.slice(1)) as [number, number][][][] } catch { merged = polys }
-      const rings: number[][][] = []
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-      for (const poly of merged) {
-        const outer = poly[0].map(([lo, la]) => sjtskOf(lo, la) as number[])
-        if (outer.length < 3) continue
-        for (const [x, y] of outer) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y }
-        rings.push(outer)
-      }
-      if (!rings.length) throw new Error('Výběr nemá platnou plochu')
-      const inSel = (x: number, y: number) => rings.some(r => pointInRing(x, y, r))
-
-      // 2) unikátní dlaždice s obsahem
-      const uniq = new Map<string, { _contentResource?: Cesium.Resource; computedTransform: Cesium.Matrix4 }>()
-      for (const t of tiles) { const cr = t._contentResource; if (cr && t.content) uniq.set(cr.url, t) }
-      if (!uniq.size) throw new Error('Žádné načtené Google dlaždice s obsahem')
-
-      // 3) projdi dlaždice, vytáhni trojúhelníky uvnitř výběru
-      const loader = getGltfLoader()
-      const YUP = (Cesium.Axis as unknown as { Y_UP_TO_Z_UP: Cesium.Matrix4 }).Y_UP_TO_Z_UP // v typech chybí, runtime OK
-      const world = new Cesium.Matrix4(), ecef = new Cesium.Cartesian3(), vwT = new THREE.Vector3()
-      const dedup = new Map<string, number>()
-      const vChunks: string[] = [], vtChunks: string[] = []
-      const faceByMat = new Map<string, string[]>()                            // materiál (= textura dlaždice) → f řádky
-      const texByKey = new Map<string, string>()                               // dlaždice#obrázek → jméno materiálu
-      const texFiles = new Map<string, { name: string; bytes: Uint8Array }>()  // materiál → soubor textury
-      let vCount = 0, triKept = 0
-      // Vrchol = pozice + UV: na švech textury je stejný bod několikrát, jinak by se texturování
-      // rozsypalo. Index je společný pro v i vt, takže se do faces píše `f i/i`.
-      const vIndex = (sx: number, sy: number, sz: number, u: number, w: number): number => {
-        const key = `${sx.toFixed(2)}_${sy.toFixed(2)}_${sz.toFixed(2)}_${u.toFixed(4)}_${w.toFixed(4)}`
-        let id = dedup.get(key)
-        if (id === undefined) {
-          vChunks.push(`v ${sx.toFixed(3)} ${sy.toFixed(3)} ${sz.toFixed(3)}`)
-          vtChunks.push(`vt ${u.toFixed(6)} ${w.toFixed(6)}`)
-          id = ++vCount; dedup.set(key, id)
-        }
-        return id
-      }
-      let done = 0
-      for (const [url, tile] of uniq) {
-        if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
-        setCutoutProgress(`zpracovávám dlaždice ${done + 1}/${uniq.size}`); setCutoutPct(done / uniq.size); done++
-        let buf: ArrayBuffer | undefined
-        try { buf = await tile._contentResource!.clone().fetchArrayBuffer() } catch { continue }
-        if (!buf) continue
-        let gltf: { scene: THREE.Object3D; parser?: GltfParser }
-        try { gltf = await new Promise((res, rej) => loader.parse(buf, '', g => res(g as unknown as { scene: THREE.Object3D; parser?: GltfParser }), rej)) } catch { continue }
-        const bin = glbBin(buf), gjson = (gltf.parser?.json ?? {}) as GltfJson
-        Cesium.Matrix4.multiply(tile.computedTransform, YUP, world)
-        gltf.scene.updateMatrixWorld(true)
-        const meshes: THREE.Mesh[] = []
-        gltf.scene.traverse(o => { const m = o as THREE.Mesh; if (m.isMesh && m.geometry) meshes.push(m) })
-        for (const m of meshes) {
-          const g = m.geometry as THREE.BufferGeometry
-          const pos = g.attributes.position as THREE.BufferAttribute | undefined
-          if (!pos) continue
-          const uv = g.attributes.uv as THREE.BufferAttribute | undefined
-          const idx = g.index
-          const nodeMat = m.matrixWorld
-          const nTri = idx ? idx.count / 3 : pos.count / 3
-
-          const faces: string[] = []
-          const toS = (i: number): [number, number, number, number, number] => {
-            vwT.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(nodeMat)
-            ecef.x = vwT.x; ecef.y = vwT.y; ecef.z = vwT.z
-            Cesium.Matrix4.multiplyByPoint(world, ecef, ecef)
-            const carto = Cesium.Cartographic.fromCartesian(ecef)
-            const lon = Cesium.Math.toDegrees(carto.longitude), lat = Cesium.Math.toDegrees(carto.latitude)
-            const sj = sjtskOf(lon, lat) as number[]
-            // glTF má počátek UV vlevo NAHOŘE, OBJ vlevo DOLE → V se překlápí
-            return [sj[0], sj[1], carto.height - GEOID_CZ, uv ? uv.getX(i) : 0, uv ? 1 - uv.getY(i) : 0]
-          }
-          for (let t = 0; t < nTri; t++) {
-            const a = idx ? idx.getX(t * 3) : t * 3, b = idx ? idx.getX(t * 3 + 1) : t * 3 + 1, c = idx ? idx.getX(t * 3 + 2) : t * 3 + 2
-            const A = toS(a), B = toS(b), C = toS(c)
-            if (!inSel((A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3)) continue
-            const ia = vIndex(A[0], A[1], A[2], A[3], A[4]), ib = vIndex(B[0], B[1], B[2], B[3], B[4]), ic = vIndex(C[0], C[1], C[2], C[3], C[4])
-            faces.push(`f ${ia}/${ia} ${ib}/${ib} ${ic}/${ic}`)
-            triKept++
-          }
-          g.dispose()
-          if (!faces.length) continue
-
-          // Textura až teď — z dlaždic mimo výběr by se JPEGy jen vršily v paměti.
-          // Bez UV nebo bez čitelného obrázku spadneme na jeden bílý materiál (geometrii nezahazujeme).
-          let matName = 'google_bez_textury'
-          const mat0 = Array.isArray(m.material) ? m.material[0] : m.material
-          const map = (mat0 as THREE.MeshStandardMaterial | undefined)?.map ?? null
-          const imgIdx = uv ? textureImageIndex(gltf.parser, gjson, map) : null
-          if (imgIdx !== null) {
-            const known = texByKey.get(`${url}#${imgIdx}`)
-            if (known) matName = known
-            else {
-              const im = gltfImage(gjson, bin, imgIdx)
-              if (im) {
-                matName = `google_tex_${texFiles.size}`
-                texFiles.set(matName, { name: `${matName}.${im.ext}`, bytes: im.bytes })
-                texByKey.set(`${url}#${imgIdx}`, matName)
-              }
-            }
-          }
-          const bucket = faceByMat.get(matName)
-          if (bucket) for (const f of faces) bucket.push(f)
-          else faceByMat.set(matName, faces)
-        }
-        await new Promise(r => setTimeout(r, 0))
-      }
-
-      // materiály bez jediného trojúhelníku uvnitř výběru do zipu nepatří (ani jejich textury)
-      const usedMats = [...faceByMat].filter(([, f]) => f.length)
-      const usedTex = usedMats.map(([mt]) => texFiles.get(mt)).filter((t): t is { name: string; bytes: Uint8Array } => !!t)
-      const texMB = usedTex.reduce((s, t) => s + t.bytes.length, 0) / 1048576
-      console.log(`Google mesh: ${uniq.size} dlaždic → ${triKept} trojúhelníků, ${vCount} vrcholů, ${usedTex.length} textur (${texMB.toFixed(1)} MB)`)
-      if (!triKept) throw new Error('V oblasti nejsou žádné Google trojúhelníky — přibliž kameru (načtou se detailnější dlaždice) a zkus znovu')
-
-      // 4) streamovaný zip (velký mesh)
-      const chunks: Uint8Array[] = []
-      let zipErr: unknown = null
-      const zip = new Zip((err, dat) => { if (err) zipErr = err; else if (dat) chunks.push(dat) })
-      const check = () => { if (zipErr) throw zipErr instanceof Error ? zipErr : new Error(String(zipErr)) }
-      const objF = new ZipDeflate('google_mesh.obj', { level: 1 }); zip.add(objF)
-      const pushLines = (L: string[]) => { for (let i = 0; i < L.length; i += 10000) { objF.push(strToU8(L.slice(i, i + 10000).join('\n') + '\n'), false); check() } }
-      objF.push(strToU8('mtllib google_mesh.mtl\no google\ng google\n'), false)
-      pushLines(vChunks)
-      pushLines(vtChunks)
-      for (const [mt, faces] of usedMats) { objF.push(strToU8(`usemtl ${mt}\n`), false); pushLines(faces) }
-      objF.push(new Uint8Array(0), true); check()
-
-      // JPEGy jdou rovnou (už jsou komprimované, deflate by je jen zdržel)
-      for (const t of usedTex) { const f = new ZipPassThrough(t.name); zip.add(f); f.push(t.bytes, true); check() }
-
-      const addText = (name: string, text: string) => { const d = new ZipDeflate(name, { level: 6 }); zip.add(d); d.push(strToU8(text), true); check() }
-      addText('google_mesh.mtl', usedMats.map(([mt]) => {
-        const t = texFiles.get(mt)
-        return [`newmtl ${mt}`, 'Ka 0.000 0.000 0.000', 'Kd 1.000 1.000 1.000', 'Ks 0.000 0.000 0.000', 'd 1.0', 'illum 1', ...(t ? [`map_Kd ${t.name}`] : []), ''].join('\n')
-      }).join('\n'))
-      if (usedTex.length) addText('vray_material.ms', buildMaxScriptFiles(usedTex.map(t => t.name)))
-      addText('info.txt', [
-        'Mesh z Google Photorealistic 3D Tiles — REFERENCE (geometrie + zapečené fototextury).',
-        'Souřadnice: reálné S-JTSK (EPSG:5514, proj4), výšky Bpv → lícuje s exportem terénu i modely.',
-        'Ořezáno na hranici vybraných parcel. Kvalita = fotogrammetrická „tavenina" (jen jako reference výšek a tvarů).',
-        'POZOR: licence Google zakazuje odvozené modely — pouze pro interní referenci při modelování.',
-        '',
-        'Obsah zipu:',
-        '  google_mesh.obj  — mesh (Y = sever, Z = výška), materiál na každou dlaždici',
-        '  google_mesh.mtl  — materiály; Max si textury natáhne sám při importu OBJ',
-        '  google_tex_*.jpg — textury dlaždic, syrové z Googlu (bez překódování)',
-        usedTex.length ? '  vray_material.ms — po importu spusť (Scripting > Run Script) pro převod na VRayMtl' : '',
-        '',
-        `Trojúhelníků: ${triKept}, vrcholů: ${vCount}, textur: ${usedTex.length} (${texMB.toFixed(1)} MB)`,
-        `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
-      ].filter(Boolean).join('\n'))
-      zip.end(); check()
-      download(concatBytes(chunks), `google_mesh_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
-      toast.success(`Vyveden Google mesh (${triKept} trojúhelníků, ${usedTex.length} textur)`)
-    } catch (e) {
-      if (isAbortError(e)) { toast.info('Export zrušen'); return }
-      console.error('Export Google meshe selhal:', e)
-      toast.error(e instanceof Error ? e.message : 'Export Google meshe selhal')
-    } finally {
-      abortRef.current = null; setCutoutBusy(false); setCutoutProgress(''); setCutoutPct(-1)
-    }
+    await runExport(cutoutUi, 'Export Google meshe selhal', ctx => exportGoogleMeshCore(tiles, parcelPolys(), ctx))
   }
 
 
