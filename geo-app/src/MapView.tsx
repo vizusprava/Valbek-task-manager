@@ -25,7 +25,7 @@ import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload,
 import {
   ION_TOKEN, isAbortError, ENABLE_GOOGLE_3D, ENABLE_OSM_BUILDINGS, ENABLE_LIBEREC_DISTRICTS, NEEDS_ION,
   GOOGLE_3D_ION_ASSET, SPLAT_ASSET_ID, SPLAT_ANCHOR, SPLAT_BASE_ROLL, SPLAT_PLACEMENT_KEY, SPLAT_ON_KEY,
-  BG_KEY, BG_CUSTOM_KEY, SHAKE_KEY, SHAKE_MAX_DEG, ZOOM_SENS, ZOOM_TAU, ZOOM_MAX,
+  BG_KEY, BG_CUSTOM_KEY, SHAKE_KEY, SHAKE_MAX_DEG, SHARP_KEY, ZOOM_SENS, ZOOM_TAU, ZOOM_MAX,
   CR_EXTENT, LIBEREC_EXTENT, GEOID_CZ, GOOGLE_LIFT_M, MAX_GLB_YAW_DEG, OSM_LIFT_M, MODEL_GLOW, EMPTY_NAMESET,
 } from './config'
 import type {
@@ -127,6 +127,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const [fov, setFov] = useState(60)
   const [bloomOn, setBloomOn] = useState(false)
   const [orbitOn, setOrbitOn] = useState(true)        // přelet obloukem kolem středu pohledu (výchozí)
+  // Ostrost obrazu = supersampling NAD RÁMEC fyzických pixelů displeje (scéna se vykreslí větší
+  // a zmenší se až při zobrazení). Pomáhá tam, kam MSAA nedosáhne: na jemnou kresbu v ortofotu,
+  // která se při zmenšování třepí. Cena roste s druhou mocninou — 1,5× = 2,25× pixelů.
+  const [sharpness, setSharpness] = useState(() => {
+    try { const v = Number(localStorage.getItem(SHARP_KEY)); return v >= 1 && v <= 2 ? v : 1 } catch { return 1 }
+  })
   // „Kamera z ruky" — jemné chvění pohledu v prezentaci. Je součástí VZHLEDU POHLEDU (CamLook),
   // ne globální volba: každý uložený pohled si nese vlastní zapnutí i intenzitu, takže se chvění
   // dá dát jen na záběry, kterým sluší. Po startu je proto vždy VYPNUTÉ a čeká, až přiletíš na
@@ -266,6 +272,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   // trvalá cache dlaždic (IndexedDB) — stav pro UI
   const [cacheInfo, setCacheInfo] = useState<{ count: number; bytes: number; pinnedBytes: number }>({ count: 0, bytes: 0, pinnedBytes: 0 })
   const refreshCache = () => { cacheStats().then(setCacheInfo).catch(() => {}) }
+  useEffect(() => {
+    const v = viewerRef.current
+    if (v && !v.isDestroyed()) v.resolutionScale = sharpness
+    try { localStorage.setItem(SHARP_KEY, String(sharpness)) } catch { /* */ }
+  }, [sharpness, viewerReady])
+
   useEffect(() => { refreshCache(); const id = setInterval(refreshCache, 4000); return () => clearInterval(id) }, [])
   // „Lokální mapa" = dlaždicová pyramida napečená do IndexedDB (store BAKED). `bakedInfo` = počet
   // dlaždic (pro UI). Při startu načteme klíče do `bakedKeys`, ať je requestImage bere lokálně.
@@ -302,6 +314,13 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       infoBox: false,
       selectionIndicator: false,
       contextOptions: { webgl: { preserveDrawingBuffer: true } }, // nutné pro snímky (canvas.toBlob)
+      // Renderovat ve SKUTEČNÝCH pixelech displeje. Cesium má `useBrowserRecommendedResolution`
+      // defaultně true, což znamená, že `window.devicePixelRatio` ignoruje a kreslí do CSS pixelů.
+      // Na displeji se škálováním (Windows běžně 125/150 %, retina 200 %) vznikne menší obraz,
+      // který prohlížeč roztáhne na plnou velikost — a to přeškálování rozdrolí každou ostrou
+      // hranu v ortofotu na jemný šum. Není to aliasing geometrie (MSAA i anizotropní filtrování
+      // jedou v Cesiu ve výchozím stavu naplno), ale renderování pod rozlišením obrazovky.
+      useBrowserRecommendedResolution: false,
     })
     viewerRef.current = viewer
     setViewerReady(true)
@@ -678,8 +697,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     const ents = [...parcelsRef.current.values()].flatMap(p => p.ents)
     const prevShow = ents.map(e => e.show)
     ents.forEach(e => { e.show = false }) // schovej tyrkysové zvýraznění → čisté snímky
+    // Snímek chceme ostřejší než obrazovka. `resolutionScale` se ale násobí ještě rozlišením
+    // displeje (viewer jede v device pixelech), takže napevno zvolené 2× by na 150% displeji
+    // znamenalo 9× pixelů. Míříme proto na PEVNÝ počet pixelů (~12 Mpx, dost na A4/300 dpi)
+    // a dopočítáme si, jaké násobení to je — nikdy míň, než na kolik je scéna nastavená.
     const prevScale = v.resolutionScale
-    v.resolutionScale = (window.devicePixelRatio || 1) >= 2 ? 1.5 : 2 // ostřejší snímek
+    const cw = v.scene.canvas.clientWidth || 1, ch = v.scene.canvas.clientHeight || 1
+    const dpr = window.devicePixelRatio || 1
+    v.resolutionScale = Math.min(3, Math.max(sharpness, Math.sqrt(12e6 / (cw * ch)) / dpr))
     try {
       const files: Record<string, Uint8Array> = {}
       let i = 0
@@ -3055,6 +3080,28 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
                 <input type="color" value={bgCustom} onChange={e => setBgCustom(e.target.value)} title="Barva pozadí"
                   className="h-5 w-7 shrink-0 cursor-pointer rounded border border-gray-700 bg-transparent p-0" />
               )}
+            </div>
+            {/* Ostrost obrazu — supersampling. Scéna už jede v pixelech displeje, tohle jde nad ně. */}
+            <div className="flex flex-col gap-1 border-t border-gray-700 pt-2">
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="shrink-0 text-gray-400">Ostrost obrazu</span>
+                <div className="ml-auto flex gap-1">
+                  {[1, 1.5, 2].map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setSharpness(s)}
+                      title={s === 1
+                        ? 'Nativní rozlišení displeje — nejrychlejší'
+                        : `Scéna se vykreslí ${s}× větší a zmenší se až na obrazovku. Uklidní třepení jemné kresby v ortofotu, ale stojí ${(s * s).toFixed(2).replace('.', ',')}× víc pixelů.`}
+                      className={`rounded px-1.5 py-0.5 text-[11px] tabular-nums ${sharpness === s ? 'bg-teal-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                    >{String(s).replace('.', ',')}×</button>
+                  ))}
+                </div>
+              </div>
+              <div className="px-1 text-[10px] leading-snug text-gray-600">
+                {viewerReady && `Renderuje se ${viewerRef.current?.scene.canvas.width ?? 0}×${viewerRef.current?.scene.canvas.height ?? 0} px`}
+                {viewerReady && (window.devicePixelRatio || 1) !== 1 && ` · displej ${Math.round((window.devicePixelRatio || 1) * 100)} %`}
+              </div>
             </div>
           </Section>
           {districtsOn && selectedDistrict && (

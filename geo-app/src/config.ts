@@ -35,6 +35,7 @@ export const SPLAT_ANCHOR = { lon: 13.42995, lat: 50.17221, h: 383 } // věž ~3
 export const SPLAT_BASE_ROLL = -90
 export const SPLAT_PLACEMENT_KEY = `geo.splat.placement.${SPLAT_ASSET_ID}` // uložené ruční usazení (localStorage)
 export const BG_KEY = 'geo.pozadi'           // režim pozadí scény (přežije reload)
+export const SHARP_KEY = 'geo.ostrost'      // supersampling nad rámec fyzických pixelů displeje
 export const SHAKE_KEY = 'geo.kamera.handheld' // { amt } — jen výchozí intenzita slideru;
                                               // zapnutí chvění patří uloženému pohledu (CamLook)
 export const SHAKE_MAX_DEG = 1.1             // výchylka pohledu při intenzitě 100 % (pořád jen plutí, ne třas)
