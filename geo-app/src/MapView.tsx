@@ -2,847 +2,52 @@ import { useEffect, useRef, useState } from 'react'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import * as THREE from 'three'
-import concaveman from 'concaveman'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { Zip, ZipDeflate, ZipPassThrough, zipSync, strToU8 } from 'three/examples/jsm/libs/fflate.module.js'
 import {
   TILE_SIZES, MESH_STEPS, MESH_STEP_DEFAULT, TEX_SIZES, type TileSize, type MeshStep, type TexSize,
   type Tile, type Offset, tileKey, tileName, tileAt, tilesBounds, tileRingLL, wgsOf, sjtskOf,
-  pool, fetchTileHeights, fetchTileOrtho, fetchRetry, fetchJpegRetry, buildTileObj, buildMtl, buildMaxScript, buildMaxScriptFiles, medianHeight,
-  gridSize, stepOf, concatBytes, estimateObjBytes, mapBboxUrl, pickTopoTier, type MapLayer,
+  pool, fetchTileHeights, fetchTileOrtho, buildTileObj, buildMtl, buildMaxScript, buildMaxScriptFiles, medianHeight,
+  gridSize, stepOf, concatBytes, estimateObjBytes,
 } from './tiles'
-import { cacheGet, cachePut, cacheStats, cacheClear, bakedGet, bakedPut, bakedAllKeys, bakedClear } from './cache'
+import { cacheStats, cacheClear, bakedGet, bakedPut, bakedAllKeys, bakedClear } from './cache'
 import { fetchOrthoUrl, orthoExport4326Url } from './orthoTiles'
-import { fetchBuildings, buildBuildingsObj, BUILDING_MTL } from './buildings'
+import { BUILDING_MTL } from './buildings'
 import { solveSimilarity, type V3 } from './similarity'
 import { dxfToPrims, type DrawParse, type DrawPrim } from './dxf'
+import { buildTextPrims } from './dxfText'
+import { createCircleDofStage, type CircleDofUniforms } from './dofCircle'
+import { CalloutLayer, DOT_DEFAULT, FRAME_DEFAULT, SIZE_DEFAULT, type Callout } from './callouts'
+import { PulseLayer, PULSE_COLOR_DEFAULT, PULSE_COUNT_DEFAULT, type PulseSet } from './pulse'
+import { applyBackground, BG_MODES, type BgMode } from './background'
 import proj4 from 'proj4'
-import { fromArrayBuffer } from 'geotiff'
 import cdt2d from 'cdt2d'
 import polygonClipping from 'polygon-clipping'
 import { toast } from 'sonner'
-import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload, Move, Crosshair, Trash2, ArrowDownToLine, RotateCcw, MapPin, Mountain, Download, Eye, EyeOff, Hexagon, Check, Sparkles, Grid3x3, X, ChevronRight, ChevronDown, Landmark } from 'lucide-react'
-
-const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN as string | undefined
-
-// Zrušený export: fetch(...,{signal}) i naše ruční `throw` házejí DOMException s name 'AbortError'.
-const isAbortError = (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
-
-// ── Přepínače funkcí (skrýt, ne mazat) ─────────────────────────────────────────────
-// Pro nasazení v task-manageru nepotřebujeme Google 3D, OSM budovy ani městské části Liberce.
-// Vypnutím zmizí jen tlačítka; funkce (ensureGoogle/ensureOsm/toggleDistricts) v kódu zůstávají,
-// takže se to kdykoliv vrátí přepnutím na true. Vše je líné → skryté tlačítko = nula výkonu.
-// POZOR: ion token používá JEN Google 3D a OSM budovy. Když jsou oba false, token není potřeba
-// (terén DMR i ortofoto jedou přímo z ČÚZK) → odpadá i celý problém s 401 na ion.
-const ENABLE_GOOGLE_3D = true
-const ENABLE_OSM_BUILDINGS = false
-const ENABLE_LIBEREC_DISTRICTS = false
-const NEEDS_ION = ENABLE_GOOGLE_3D || ENABLE_OSM_BUILDINGS
-
-// Google Photorealistic 3D Tiles streamované přes Cesium ion (stačí ion token, žádný Google klíč).
-// Asset je nutné jednorázově přidat ve svém ion účtu (Asset Depot → Google Photorealistic 3D Tiles).
-const GOOGLE_3D_ION_ASSET = 2275207
-
-// TEST: Gaussian splat (Schillerova rozhledna nad Kryry) nahraný do Cesium ion → 3D Tiles.
-const SPLAT_ASSET_ID = 5137495
-const SPLAT_ANCHOR = { lon: 13.42995, lat: 50.17221, h: 383 } // věž ~383 m n.m. (Bpv)
-// Splat z COLMAPu chodí otočený o 90° (Y-up vs Cesium Z-up) → výchozí roll narovná nastojato.
-const SPLAT_BASE_ROLL = -90
-const SPLAT_PLACEMENT_KEY = `geo.splat.placement.${SPLAT_ASSET_ID}` // uložené ruční usazení (localStorage)
-const SPLAT_ON_KEY = `geo.splat.on.${SPLAT_ASSET_ID}` // „splat byl zapnutý" → po startu se sám načte
-
-// S-JTSK / Křovák (EPSG:5514) — katastr WFS vrací geometrii v něm, přepočítáváme na WGS84.
-// Definice (7-param Helmert) je v ./tiles, který se načte dřív než tenhle modul.
-
-// ── ČÚZK WMS služby (ověřeno přes GetCapabilities — všechny podporují EPSG:3857) ──
-
-// větší dlaždice = méně requestů = méně opakujících se ČÚZK log v mapě
-const WMS_TILE = 512
-
-// Volitelný externí lokální dlaždicový server (viz scripts/tile-server.mjs) — má přednost.
-const LOCAL_TILES = import.meta.env.VITE_LOCAL_TILES as string | undefined
-
-// Index napečených ortofoto dlaždic („lokální mapa") v paměti — synchronní kontrola v requestImage.
-// Klíč = 'owms/{level}/{x}/{y}' (GEOGRAPHIC dlaždice WMS). Plní se z IndexedDB (store BAKED) při startu.
-const bakedKeys = new Set<string>()
-
-// čerstvá průhledná 1×1 dlaždice (Cesium ImageBitmap po použití zavírá → nesdílet jednu instanci)
-function blankTile(): Promise<ImageBitmap> {
-  const c = document.createElement('canvas'); c.width = 1; c.height = 1
-  return createImageBitmap(c)
-}
-
-/**
- * Ortofoto WMS s lokální dlaždicovou pyramidou. Zobrazení jde DÁL přes WMS (`super.requestImage`) —
- * jen dlaždice NAPEČENÉ do localu (`bakedKeys`) se vezmou z IndexedDB (nativní rozlišení, offline,
- * okamžité). Prázdný `bakedKeys` = 100 % čisté WMS → mapa se nemůže rozbít. Napečené dlaždice se
- * dekódují STEJNOU cestou jako živé WMS (`Resource.fetchImage` s flipY) → orientace/zarovnání sedí.
- */
-class CachedWmsOrtho extends Cesium.WebMapServiceImageryProvider {
-  requestImage(x: number, y: number, level: number, request?: Cesium.Request): Promise<Cesium.ImageryTypes> | undefined {
-    const key = `owms/${level}/${x}/${y}`
-    if (!bakedKeys.has(key)) return super.requestImage(x, y, level, request) // nenapečené = živé WMS jako dosud
-    return bakedGet(key).then(b => {
-      if (!b) return (super.requestImage(x, y, level, request) ?? blankTile()) as Promise<Cesium.ImageryTypes>
-      const url = URL.createObjectURL(new Blob([b as BlobPart], { type: 'image/jpeg' }))
-      const img = new Cesium.Resource({ url }).fetchImage({ preferImageBitmap: true, flipY: true })
-      return Promise.resolve((img ?? blankTile()) as Promise<Cesium.ImageryTypes>).finally(() => URL.revokeObjectURL(url))
-    })
-  }
-}
-
-function ortofotoProvider() {
-  if (LOCAL_TILES) {
-    return new Cesium.UrlTemplateImageryProvider({
-      url: `${LOCAL_TILES.replace(/\/$/, '')}/orto/{z}/{x}/{y}.jpg`,
-      rectangle: LIBEREC_EXTENT,
-      minimumLevel: 10,
-      maximumLevel: 19,
-      tileWidth: 256,
-      tileHeight: 256,
-    })
-  }
-  return new CachedWmsOrtho({
-    url: 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer',
-    layers: '0',
-    tileWidth: WMS_TILE,
-    tileHeight: WMS_TILE,
-    parameters: { format: 'image/png', transparent: false },
-  })
-}
-
-// Základní topografická mapa ČR (ZTM) — stylovaná rastrová kartografie.
-// Stylizovaná podle měřítka, takže podle výšky kamery přepínáme tier.
-const ZTM_TIERS = [
-  { code: 'ZTM250', minH: 150_000 },
-  { code: 'ZTM100', minH: 60_000 },
-  { code: 'ZTM50',  minH: 25_000 },
-  { code: 'ZTM25',  minH: 8_000 },
-  { code: 'ZTM10',  minH: 0 },
-] as const
-
-function ztmProvider(code: string) {
-  return new Cesium.WebMapServiceImageryProvider({
-    url: `https://ags.cuzk.gov.cz/arcgis1/services/ZTM/${code}/MapServer/WMSServer`,
-    layers: '0',
-    tileWidth: WMS_TILE,
-    tileHeight: WMS_TILE,
-    parameters: { format: 'image/png', transparent: false },
-  })
-}
-
-function pickZtmTier(height: number): string {
-  for (const t of ZTM_TIERS) if (height >= t.minH) return t.code
-  return 'ZTM10'
-}
-
-function katastrProvider() {
-  return new Cesium.WebMapServiceImageryProvider({
-    url: 'https://services.cuzk.cz/wms/wms.asp',
-    layers: 'hranice_parcel,parcelni_cisla,obrazy_parcel,DEF_BUDOVY',
-    parameters: { format: 'image/png', transparent: true },
-  })
-}
-
-const CR_EXTENT = Cesium.Rectangle.fromDegrees(12.0, 48.5, 18.9, 51.1)
-// úvodní pohled: přiblížení na Liberec
-const LIBEREC_EXTENT = Cesium.Rectangle.fromDegrees(14.98, 50.72, 15.13, 50.81)
-// geoidová odchylka Bpv→WGS84 elipsoid v ČR (~+44 m); konstanta lokálně stačí
-const GEOID_CZ = 44
-// Google Photorealistic dlaždice sedí ~0,5 m níž než DMR — zvedneme je, ať to lícuje
-const GOOGLE_LIFT_M = 0.5
-// 3ds Max při exportu glb otočí model o 90° kolem svislé osy — při kotveném importu kompenzujeme
-const MAX_GLB_YAW_DEG = 90
-// OSM budovy posunout o 1 m dolů, ať lépe sedí na terén
-const OSM_LIFT_M = -1.5
-// svítící obrys kolem importovaného modelu (glow) + barva hrany řezu terénem
-const MODEL_GLOW = Cesium.Color.fromCssColorString('#38f8ff')
-
-// Omezení souběžných DMR fetchů: velká plocha jinak vystřelí tisíce fetchů naráz → ERR_INSUFFICIENT_RESOURCES.
-// Jednoduchý semafor + cache dlaždic (sampleTerrain často žádá tytéž dlaždice opakovaně).
-const DMR_MAX_CONCURRENT = 6
-let dmrActive = 0
-const dmrQueue: (() => void)[] = []
-function dmrAcquire(): Promise<void> {
-  if (dmrActive < DMR_MAX_CONCURRENT) { dmrActive++; return Promise.resolve() }
-  return new Promise<void>(res => dmrQueue.push(() => { dmrActive++; res() }))
-}
-function dmrRelease() {
-  dmrActive--
-  dmrQueue.shift()?.()
-}
-const dmrTileCache = new Map<string, Float32Array>()
-const DMR_CACHE_MAX = 4000
-
-// Terén celé mapy z ČÚZK DMR 5G — výšky se tahají z exportImage pro každou dlaždici za běhu.
-// Tím ortofoto/ZTM i vložené plochy/modely leží na stejném přesném terénu.
-function makeDmrTerrain(): Cesium.CustomHeightmapTerrainProvider {
-  const tilingScheme = new Cesium.GeographicTilingScheme()
-  const W = 64, H = 64
-  return new Cesium.CustomHeightmapTerrainProvider({
-    width: W,
-    height: H,
-    tilingScheme,
-    callback: async (x, y, level) => {
-      const rect = tilingScheme.tileXYToRectangle(x, y, level)
-      const west = Cesium.Math.toDegrees(rect.west), south = Cesium.Math.toDegrees(rect.south)
-      const east = Cesium.Math.toDegrees(rect.east), north = Cesium.Math.toDegrees(rect.north)
-      const flat = new Float32Array(W * H)
-      if (east < 12.0 || west > 18.9 || north < 48.5 || south > 51.1) return flat // mimo ČR
-      const key = `${level}/${x}/${y}`
-      const cached = dmrTileCache.get(key)
-      if (cached) return cached
-      // trvalá cache (disk) — přežije refresh; klíč odlišený od exportních dlaždic (jiné dláždění + GEOID)
-      const dbKey = `dmrterr/${level}/${x}/${y}`
-      const disk = await cacheGet(dbKey)
-      if (disk && disk.byteLength === W * H * 4) {
-        const out = new Float32Array(disk.slice().buffer)
-        dmrTileCache.set(key, out)
-        return out
-      }
-      await dmrAcquire()
-      try {
-        const hit = dmrTileCache.get(key) // mezitím mohla dorazit
-        if (hit) return hit
-        const url = `https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer/exportImage?bbox=${west},${south},${east},${north}&bboxSR=4326&imageSR=4326&size=${W},${H}&format=tiff&pixelType=F32&f=image`
-        const img = await (await fromArrayBuffer(await (await fetch(url)).arrayBuffer())).getImage()
-        const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
-        const out = new Float32Array(W * H)
-        for (let i = 0; i < W * H; i++) {
-          const e = r[i] as number
-          out[i] = Number.isFinite(e) && e > -500 && e < 3000 ? e + GEOID_CZ : 0
-        }
-        if (dmrTileCache.size >= DMR_CACHE_MAX) dmrTileCache.delete(dmrTileCache.keys().next().value as string)
-        dmrTileCache.set(key, out)
-        void cachePut(dbKey, new Uint8Array(out.buffer.slice(0)))
-        return out
-      } catch {
-        return flat
-      } finally {
-        dmrRelease()
-      }
-    },
-  })
-}
-
-type Base = 'ortofoto' | 'zm' | 'google'
-
-// kotva modelu: zeměpisná poloha + výška nad terénem + natočení (heading/pitch/roll) + měřítko
-type Placement = { lon: number; lat: number; groundH: number; heightOffset: number; heading: number; pitch: number; roll: number; scale: number }
-
-type GroundHit = { lon: number; lat: number; height: number }
-type Parcel = { id: string; positions: Cesium.Cartesian3[] }
-type Anchor = { lon: number; lat: number; h: number }
-
-// jeden importovaný model ve scéně
-type ModelEntry = {
-  id: string
-  name: string
-  model: Cesium.Model
-  url: string
-  center: Cesium.Cartesian3
-  yawDeg: number
-  placement: Placement
-  visible: boolean
-  footprint?: Cesium.Cartesian3[][] // obrys(y) půdorysu ve světě (S-JTSK přes kotvu) pro skrytí mapy
-  excavate?: boolean                // skrýt mapu (ortofoto/topo + terén + Google) pod/nad modelem
-  outline?: boolean                 // svítící obrys (silhouette) kolem modelu; výchozí vypnuto
-}
-// položka panelu Scéna
-type SceneObj = { id: string; kind: 'model' | 'parcel' | 'surface' | 'drawing'; name: string; visible: boolean }
-// jedna hladina výkresu — vlastní Cesium primitivy, aby šla samostatně zapnout/vypnout
-type DrawLayer = { name: string; color: number; visible: boolean; prim: Cesium.Primitive | null; labels: Cesium.LabelCollection | null; points: Cesium.PointPrimitiveCollection | null }
-// `up` = svislý směr ve středu výkresu (pro posun výšky přes modelMatrix). *Refs = odkazy na prvky
-// + jejich základní barvy (pro živé nastavení průhlednosti celého výkresu).
-type DrawingEntry = {
-  layers: DrawLayer[]; bounds: Cesium.Rectangle | null; up: Cesium.Cartesian3
-  labelRefs: { l: Cesium.Label; f: Cesium.Color; o: Cesium.Color }[]
-  pointRefs: { p: Cesium.PointPrimitive; c: Cesium.Color }[]
-  polyRefs: { prim: Cesium.Primitive; id: string; c: Cesium.Color }[]
-}
-const EMPTY_NAMESET: ReadonlySet<string> = new Set()
-
-/**
- * Geo-kotva v názvu jako CELÁ ČÍSLA bez teček (lon/lat v mikrostupních, výška v cm) —
- * tečky některé programy (3ds Max) usekávají u prvního „.". Formát: geo_<lonE6>_<latE6>_<hCm>.
- */
-function parseAnchor(name: string): Anchor | null {
-  const m = name.match(/geo_(-?\d+)_(-?\d+)_(-?\d+)/)
-  return m ? { lon: +m[1] / 1e6, lat: +m[2] / 1e6, h: +m[3] / 100 } : null
-}
-
-function download(data: BlobPart, filename: string, mime: string) {
-  const url = URL.createObjectURL(new Blob([data], { type: mime }))
-  const a = document.createElement('a')
-  a.href = url; a.download = filename; a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
-function anchorFilename(anchor: Anchor, ext: string): string {
-  const lon = Math.round(anchor.lon * 1e6)
-  const lat = Math.round(anchor.lat * 1e6)
-  const h = Math.round(anchor.h * 100)
-  return `geo_${lon}_${lat}_${h}.${ext}`
-}
-
-/**
- * Uzavřené 3D polyliny do DXF (R12) — importuje se do 3ds Max/CAD jako editovatelné splajny/tvary.
- * Souřadnice v lokálním ENU (X=východ, Y=sever, Z=nahoru), stejný rámec jako OBJ export terénu.
- */
-function buildDxf(polylines: [number, number, number][][], layer = 'PARCELY'): string {
-  return buildDxfLayers([{ layer, polylines }])
-}
-
-/** Jako buildDxf, ale víc pojmenovaných hladin v jednom výkresu (např. parcely + obrys území). */
-function buildDxfLayers(groups: { layer: string; polylines: [number, number, number][][] }[]): string {
-  const L: (string | number)[] = []
-  const g = (code: number, val: string | number) => { L.push(code, val) }
-  g(0, 'SECTION'); g(2, 'ENTITIES')
-  for (const grp of groups) for (const pl of grp.polylines) {
-    g(0, 'POLYLINE'); g(8, grp.layer); g(66, 1); g(70, 9) // 1=uzavřená + 8=3D polylinie
-    for (const [x, y, z] of pl) {
-      g(0, 'VERTEX'); g(8, grp.layer)
-      g(10, x.toFixed(4)); g(20, y.toFixed(4)); g(30, z.toFixed(4)); g(70, 32) // 32=vrchol 3D polylinie
-    }
-    g(0, 'SEQEND')
-  }
-  g(0, 'ENDSEC'); g(0, 'EOF')
-  return L.join('\n')
-}
-
-/** Výškový rastr z ČÚZK ImageServeru (dmr5g/dmp1g) → vzorkovací funkce lon/lat → výška (Bpv). */
-async function fetchElevSampler(service: 'dmr5g' | 'dmp1g', minLon: number, minLat: number, maxLon: number, maxLat: number, size: number): Promise<(lon: number, lat: number) => number | null> {
-  const url = `https://ags.cuzk.gov.cz/arcgis2/rest/services/${service}/ImageServer/exportImage?bbox=${minLon},${minLat},${maxLon},${maxLat}&bboxSR=4326&imageSR=4326&size=${size},${size}&format=tiff&pixelType=F32&f=image`
-  return fetchRetry(url, { parse: async res => {
-    if (!res.ok) throw new Error(`${service}: HTTP ${res.status}`)
-    const img = await (await fromArrayBuffer(await res.arrayBuffer())).getImage()
-    const w = img.getWidth(), h = img.getHeight()
-    if (!w || !h) throw new Error(`${service}: prázdný rastr`)
-    const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
-    return (lon, lat) => {
-      const x = Math.max(0, Math.min(w - 1, Math.round(((lon - minLon) / (maxLon - minLon)) * w - 0.5)))
-      const y = Math.max(0, Math.min(h - 1, Math.round(((maxLat - lat) / (maxLat - minLat)) * h - 0.5)))
-      const e = r[y * w + x] as number
-      return Number.isFinite(e) && e > -500 && e < 3000 ? e : null
-    }
-  } })
-}
-
-/**
- * Totéž, ale rovnou v S-JTSK (EPSG:5514) → vzorkovač (X,Y)→výška Bpv. Používá výřez katastru,
- * který trianguluje v S-JTSK rovině (stejně jako dlaždice), takže výšky vzorkuje bez reprojekce.
- * Výšky jsou syrové Bpv (BEZ geoidu) — shodně s dlaždicemi (fetchTileHeights), ať export lícuje.
- */
-async function fetchElevSamplerSJTSK(service: 'dmr5g' | 'dmp1g', minX: number, minY: number, maxX: number, maxY: number, sw: number, sh: number, signal?: AbortSignal): Promise<(x: number, y: number) => number | null> {
-  const url = `https://ags.cuzk.gov.cz/arcgis2/rest/services/${service}/ImageServer/exportImage?bbox=${minX},${minY},${maxX},${maxY}&bboxSR=5514&imageSR=5514&size=${sw},${sh}&format=tiff&pixelType=F32&f=image`
-  return fetchRetry(url, { signal, parse: async res => {
-    if (!res.ok) throw new Error(`${service}: HTTP ${res.status}`)
-    const img = await (await fromArrayBuffer(await res.arrayBuffer())).getImage()
-    const w = img.getWidth(), h = img.getHeight()
-    if (!w || !h) throw new Error(`${service}: prázdný rastr`)
-    const r = (await img.readRasters())[0] as unknown as ArrayLike<number>
-    return (x, y) => {
-      const px = Math.max(0, Math.min(w - 1, Math.round(((x - minX) / (maxX - minX)) * w - 0.5)))
-      const py = Math.max(0, Math.min(h - 1, Math.round(((maxY - y) / (maxY - minY)) * h - 0.5)))
-      const e = r[py * w + px] as number
-      return Number.isFinite(e) && e > -500 && e < 3000 ? e : null
-    }
-  } })
-}
-
-/**
- * Budovy ČÚZK pro S-JTSK obdélník → OBJ objekt „budovy" (výška i tvar střechy z DMR5G/DMP1G).
- * Vrací kus OBJ textu k připojení, počet přidaných vrcholů a řádek do info.txt.
- */
-async function buildingsObjChunk(minX: number, minY: number, maxX: number, maxY: number, vBase: number, signal: AbortSignal): Promise<{ obj: string; vCount: number; line: string }> {
-  const span = Math.max(maxX - minX, maxY - minY)
-  const long = Math.min(2048, Math.max(64, Math.ceil(span / 2))) // ~2 m/px, strop 2048
-  const sw = Math.max(2, Math.round(long * (maxX - minX) / span))
-  const sh = Math.max(2, Math.round(long * (maxY - minY) / span))
-  const [ground, surface, fps] = await Promise.all([
-    fetchElevSamplerSJTSK('dmr5g', minX, minY, maxX, maxY, sw, sh, signal), // terén = spodek zdí
-    fetchElevSamplerSJTSK('dmp1g', minX, minY, maxX, maxY, sw, sh, signal), // povrch = tvar střechy
-    fetchBuildings(minX, minY, maxX, maxY, signal),
-  ])
-  if (signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
-  if (!fps.length) return { obj: '', vCount: 0, line: 'Budovy: v oblasti žádné' }
-  const bo = buildBuildingsObj(fps, ground, surface, vBase)
-  if (!bo.count) return { obj: '', vCount: 0, line: 'Budovy: nevznikly (chybí DMP1G data?)' }
-  const obj = 'o budovy\ng budovy\nusemtl budovy\n' + bo.verts.join('\n') + '\n' + bo.faces.join('\n') + '\n'
-  return { obj, vCount: bo.vCount, line: `Budovy: ${bo.count} (plochých ${bo.stats.flat}, sedlových ${bo.stats.gable}, valbových ${bo.stats.hip})` }
-}
-
-/** Najde 3D bod povrchu (terén/dlaždice) pod daným bodem obrazovky. */
-function pickGround(v: Cesium.Viewer, screen: Cesium.Cartesian2): GroundHit | null {
-  const scene = v.scene
-  let cart: Cesium.Cartesian3 | undefined
-  if (scene.pickPositionSupported) {
-    const c = scene.pickPosition(screen)
-    if (Cesium.defined(c)) cart = c
-  }
-  if (!cart) {
-    const ray = v.camera.getPickRay(screen)
-    if (ray) { const c = scene.globe.pick(ray, scene); if (Cesium.defined(c)) cart = c }
-  }
-  if (!cart) {
-    const c = v.camera.pickEllipsoid(screen, scene.globe.ellipsoid)
-    if (Cesium.defined(c)) cart = c
-  }
-  if (!cart) return null
-  const carto = Cesium.Cartographic.fromCartesian(cart)
-  return { lon: Cesium.Math.toDegrees(carto.longitude), lat: Cesium.Math.toDegrees(carto.latitude), height: carto.height }
-}
-
-/** Bod terénu pod kurzorem nezávisle na modelu (globe.pick ignoruje primitivy modelu). */
-function pickTerrain(v: Cesium.Viewer, screen: Cesium.Cartesian2): GroundHit | null {
-  const ray = v.camera.getPickRay(screen)
-  let cart = ray ? v.scene.globe.pick(ray, v.scene) : undefined
-  if (!Cesium.defined(cart)) cart = v.camera.pickEllipsoid(screen, v.scene.globe.ellipsoid)
-  if (!Cesium.defined(cart)) return null
-  const carto = Cesium.Cartographic.fromCartesian(cart)
-  return { lon: Cesium.Math.toDegrees(carto.longitude), lat: Cesium.Math.toDegrees(carto.latitude), height: carto.height }
-}
-
-/** Povrch pod středem obrazovky (kam se zhruba dívá kamera). */
-function viewCenterGround(v: Cesium.Viewer): GroundHit {
-  const canvas = v.scene.canvas
-  const center = new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2)
-  const hit = pickGround(v, center)
-  if (hit) return hit
-  const carto = v.camera.positionCartographic
-  return { lon: Cesium.Math.toDegrees(carto.longitude), lat: Cesium.Math.toDegrees(carto.latitude), height: 0 }
-}
-
-function positionOf(p: Placement): Cesium.Cartesian3 {
-  return Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.groundH + p.heightOffset)
-}
-
-function buildMatrix(p: Placement, centerOffset: Cesium.Cartesian3, yawDeg = 0): Cesium.Matrix4 {
-  const hpr = new Cesium.HeadingPitchRoll(
-    Cesium.Math.toRadians(p.heading + yawDeg),
-    Cesium.Math.toRadians(p.pitch),
-    Cesium.Math.toRadians(p.roll),
-  )
-  const frame = Cesium.Transforms.headingPitchRollToFixedFrame(positionOf(p), hpr)
-  const scaled = Cesium.Matrix4.multiplyByUniformScale(frame, p.scale, new Cesium.Matrix4())
-  const tneg = Cesium.Matrix4.fromTranslation(Cesium.Cartesian3.negate(centerOffset, new Cesium.Cartesian3()))
-  return Cesium.Matrix4.multiply(scaled, tneg, new Cesium.Matrix4())
-}
-
-// three loader jen pro změření modelu (nejnižší bod) — Cesium si model vykresluje sám
-let gltfLoader: GLTFLoader | null = null
-function getGltfLoader(): GLTFLoader {
-  if (!gltfLoader) {
-    gltfLoader = new GLTFLoader()
-    const draco = new DRACOLoader()
-    draco.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/')
-    gltfLoader.setDRACOLoader(draco)
-    gltfLoader.setMeshoptDecoder(MeshoptDecoder)
-  }
-  return gltfLoader
-}
-
-/** Nejnižší bod modelu (gltf Y-up = cesium Z-up). null = nezměřeno. */
-async function computeBottomZ(file: File): Promise<number | null> {
-  try {
-    const buf = await file.arrayBuffer()
-    const gltf = await new Promise<{ scene: THREE.Object3D }>((resolve, reject) => {
-      getGltfLoader().parse(buf, '', g => resolve(g as unknown as { scene: THREE.Object3D }), reject)
-    })
-    const box = new THREE.Box3().setFromObject(gltf.scene)
-    return Number.isFinite(box.min.y) ? box.min.y : null
-  } catch { return null }
-}
-
-/**
- * Model z 3ds Max s reálnými S-JTSK (EPSG:5514) souřadnicemi v geometrii → přemapuje každý vrchol
- * proj4 (S-JTSK→WGS84) + výška Bpv→elipsoid a zapeče do lokálního ENU rámce (E,U,-N) kolem těžiště,
- * stejnou konvencí jako náš export. Vrací glb URL + geo-kotvu. null = nevypadá jako S-JTSK (necháme ruční).
- * Osy/znaménko se detekují z dat: výška = osa s nejmenší velikostí, horizontály dle velikosti (v ČR |Y|>|X|),
- * proj4 chce záporné hodnoty.
- */
-// ── Půdorys modelu (konkávní obal) pro skrytí mapy pod/nad modelem ────────────────────
-const FOOT_GRID_M = 0.15       // sjednocení bodů do mřížky (hustá síť má statisíce vrcholů → výkon)
-const FOOT_CONCAVITY = 2       // concaveman: menší = detailnější obrys
-const FOOT_MIN_INLET_M = 0.5   // zálivy kratší než tohle se vyhladí
-const FOOT_SIMPLIFY_M = 0.2    // tolerance zjednodušení obrysu (Douglas–Peucker), v metrech
-const FOOT_MAX_PTS = 250       // strop bodů obrysu — víc Cesium clip polygon spolehlivě neořízne
-const FOOT_MAX_TRIS_UNION = 40000 // nad tolik trojúhelníků je 2D union pomalý → fallback na konkávní obal
-// objekty v modelu, které slouží JEN jako maska ořezu (podle názvu). Když nějaké jsou, obrys se
-// počítá z nich (každý zvlášť); jinak z celého modelu.
-const MASK_NAME_RE = /maska|mask|clip|ořez|orez|výřez|vyrez|object006|object007/i
-
-/** Douglas–Peucker (iterativně, bez rekurze) na otevřenou lomenou čáru; krajní body zachová. */
-function simplifyRDP(pts: [number, number][], eps: number): [number, number][] {
-  const n = pts.length
-  if (n < 3) return pts.slice()
-  const keep = new Uint8Array(n)
-  keep[0] = 1; keep[n - 1] = 1
-  const stack: [number, number][] = [[0, n - 1]]
-  while (stack.length) {
-    const seg = stack.pop()!, s = seg[0], e = seg[1]
-    const ax = pts[s][0], ay = pts[s][1], bx = pts[e][0], by = pts[e][1]
-    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy
-    let maxD = -1, idx = -1
-    for (let i = s + 1; i < e; i++) {
-      const px = pts[i][0], py = pts[i][1]
-      let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0
-      t = t < 0 ? 0 : t > 1 ? 1 : t
-      const cx = ax + t * dx, cy = ay + t * dy
-      const d = Math.hypot(px - cx, py - cy)
-      if (d > maxD) { maxD = d; idx = i }
-    }
-    if (idx > 0 && maxD > eps) { keep[idx] = 1; stack.push([s, idx], [idx, e]) }
-  }
-  const out: [number, number][] = []
-  for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i])
-  return out
-}
-
-/** Uzavře, zjednoduší (Douglas–Peucker) a osekne prstenec na strop bodů; null když <3 body. */
-function simplifyRingCapped(ring: [number, number][]): [number, number][] | null {
-  if (ring.length > 1) { const a = ring[0], b = ring[ring.length - 1]; if (a[0] === b[0] && a[1] === b[1]) ring = ring.slice(0, -1) }
-  if (ring.length < 3) return null
-  // Cesium clip polygon zvládne jen omezený počet bodů → zvyšuj toleranci, dokud nejsme pod stropem
-  let eps = FOOT_SIMPLIFY_M
-  let simp = simplifyRDP(ring, eps)
-  while (simp.length > FOOT_MAX_PTS && eps < 100) { eps *= 1.7; simp = simplifyRDP(ring, eps) }
-  return simp.length >= 3 ? simp : null
-}
-
-/** Konkávní obal 2D bodů → zjednodušený prstenec [[x,y],…] bez děr; null když málo bodů. */
-function concaveFootprint(pts: [number, number][]): [number, number][] | null {
-  if (pts.length < 3) return null
-  // dedup do mřížky kvůli výkonu (interiér nás nezajímá, obrys drží krajní body)
-  const grid = new Map<string, [number, number]>()
-  for (const [x, y] of pts) { const k = `${Math.round(x / FOOT_GRID_M)}_${Math.round(y / FOOT_GRID_M)}`; if (!grid.has(k)) grid.set(k, [x, y]) }
-  const uniq = [...grid.values()]
-  if (uniq.length < 3) return null
-  let raw: number[][]
-  try { raw = concaveman(uniq, FOOT_CONCAVITY, FOOT_MIN_INLET_M) } catch (e) { console.error('Konkávní obal selhal:', e); return null }
-  return simplifyRingCapped(raw.map(([x, y]) => [x, y] as [number, number]))
-}
-
-/** Přesný obrys plochy = 2D union trojúhelníků (polygon-clipping). Vrací vnější prstence (díry zahodí,
- * Cesium clip je neumí), takže vhloubení/mezery mezi rameny zůstanou nevyříznuté (žádné černé díry). */
-function unionOutlines(tris: [number, number][][]): [number, number][][] {
-  if (!tris.length) return []
-  const polys = tris.map(t => [[t[0], t[1], t[2], t[0]]] as [number, number][][])
-  let merged: [number, number][][][]
-  try { merged = polygonClipping.union(polys[0], ...polys.slice(1)) as unknown as [number, number][][][] }
-  catch (e) { console.error('Union masky selhal:', e); return [] }
-  const rings: [number, number][][] = []
-  for (const poly of merged) { const outer = poly[0]; if (outer && outer.length >= 4) rings.push(outer.map(([x, y]) => [x, y] as [number, number])) }
-  return rings
-}
-
-async function georeferenceSjtskGlb(file: File): Promise<{ url: string; anchor: Anchor; bottomZ: number; footprint: Cesium.Cartesian3[][] | null } | null> {
-  const buf = await file.arrayBuffer()
-  const gltf = await new Promise<{ scene: THREE.Object3D }>((res, rej) => {
-    getGltfLoader().parse(buf, '', g => res(g as unknown as { scene: THREE.Object3D }), rej)
-  })
-  const scene = gltf.scene
-  scene.updateMatrixWorld(true)
-  const box = new THREE.Box3().setFromObject(scene)
-  if (box.isEmpty()) return null
-  const c = box.getCenter(new THREE.Vector3())
-  const comp = (v: THREE.Vector3, a: 'x' | 'y' | 'z') => (a === 'x' ? v.x : a === 'y' ? v.y : v.z)
-  // velké souřadnice (statisíce metrů) ⇒ S-JTSK; jinak běžný model
-  if (Math.max(Math.abs(c.x), Math.abs(c.y), Math.abs(c.z)) < 100000) return null
-
-  const axes: Array<{ k: 'x' | 'y' | 'z'; val: number }> = [
-    { k: 'x' as const, val: c.x }, { k: 'y' as const, val: c.y }, { k: 'z' as const, val: c.z },
-  ].sort((a, b) => Math.abs(a.val) - Math.abs(b.val))
-  const upAxis = axes[0].k                        // nejmenší velikost = výška
-  const xAxis = axes[1].k, yAxis = axes[2].k       // menší horizontální = S-JTSK X, větší = Y
-  const fx = axes[1].val > 0 ? -1 : 1              // proj4 EPSG:5514 chce záporné
-  const fy = axes[2].val > 0 ? -1 : 1
-  const toSjtsk = (v: THREE.Vector3): [number, number, number] => [fx * comp(v, xAxis), fy * comp(v, yAxis), comp(v, upAxis)]
-
-  const [aLon, aLat] = proj4('EPSG:5514', 'EPSG:4326', [fx * comp(c, xAxis), fy * comp(c, yAxis)]) as [number, number]
-  const anchor: Anchor = { lon: aLon, lat: aLat, h: comp(c, upAxis) + GEOID_CZ }
-  const anchorECEF = Cesium.Cartesian3.fromDegrees(anchor.lon, anchor.lat, anchor.h)
-  const inv = Cesium.Matrix4.inverseTransformation(Cesium.Transforms.eastNorthUpToFixedFrame(anchorECEF), new Cesium.Matrix4())
-  const s = new Cesium.Cartesian3(), o = new Cesium.Cartesian3(), vw = new THREE.Vector3()
-  let minU = Infinity
-  const allPts: [number, number][] = [] // ENU (east, north) všech vrcholů — fallback obrys celého modelu
-  const maskTris = new Map<string, [number, number][][]>() // ENU trojúhelníky maskovacích objektů (podle názvu)
-
-  const meshes: THREE.Mesh[] = []
-  scene.traverse(obj => { const m = obj as THREE.Mesh; if (m.isMesh && m.geometry) meshes.push(m) })
-  for (const m of meshes) {
-    const g = m.geometry as THREE.BufferGeometry
-    const pos = g.attributes.position as THREE.BufferAttribute
-    const wm = m.matrixWorld
-    const isMask = MASK_NAME_RE.test(m.name)
-    const meshEN: [number, number][] = isMask ? new Array(pos.count) : [] // ENU vrcholy jen u masky (pro trojúhelníky)
-    for (let i = 0; i < pos.count; i++) {
-      vw.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(wm) // do světových souřadnic (respektuj hierarchii)
-      const [sx, sy, up] = toSjtsk(vw)
-      const [lon, lat] = proj4('EPSG:5514', 'EPSG:4326', [sx, sy]) as [number, number]
-      const e = Cesium.Cartesian3.fromDegrees(lon, lat, up + GEOID_CZ)
-      s.x = e.x; s.y = e.y; s.z = e.z
-      Cesium.Matrix4.multiplyByPoint(inv, s, o) // (east, north, up) v ENU kolem kotvy
-      pos.setXYZ(i, o.x, o.z, -o.y)             // gltf (E, U, -N) — stejné jako buildExportScene
-      if (o.z < minU) minU = o.z
-      allPts.push([o.x, o.y])                   // ENU (east, north)
-      if (isMask) meshEN[i] = [o.x, o.y]
-    }
-    if (isMask) {
-      let tris = maskTris.get(m.name); if (!tris) { tris = []; maskTris.set(m.name, tris) }
-      const idx = g.index
-      if (idx) { for (let t = 0; t + 2 < idx.count; t += 3) tris.push([meshEN[idx.getX(t)], meshEN[idx.getX(t + 1)], meshEN[idx.getX(t + 2)]]) }
-      else { for (let t = 0; t + 2 < meshEN.length; t += 3) tris.push([meshEN[t], meshEN[t + 1], meshEN[t + 2]]) }
-    }
-    pos.needsUpdate = true
-    g.computeVertexNormals()
-    g.computeBoundingSphere()
-  }
-  // world transformy jsou zapečené do vrcholů → vynuluj všechny node transformy
-  scene.traverse(obj => { obj.position.set(0, 0, 0); obj.quaternion.identity(); obj.scale.set(1, 1, 1); obj.updateMatrix() })
-  scene.updateMatrixWorld(true)
-
-  const glbBuf = await new Promise<ArrayBuffer>((res, rej) => new GLTFExporter().parse(scene, r => res(r as ArrayBuffer), rej, { binary: true }))
-  const url = URL.createObjectURL(new Blob([glbBuf], { type: 'model/gltf-binary' }))
-
-  // obrys(y) půdorysu → svět přes kotvu (přesné, nezávislé na Cesium korekci os).
-  // Maskovací objekty: přesný obrys geometrie (union trojúhelníků) → vhloubení zůstanou nevyříznutá.
-  // Bez masek: konkávní obal celého modelu.
-  const F = Cesium.Transforms.eastNorthUpToFixedFrame(anchorECEF)
-  const enToWorld = (e: number, n: number) => Cesium.Matrix4.multiplyByPoint(F, new Cesium.Cartesian3(e, n, 0), new Cesium.Cartesian3())
-  const footprint: Cesium.Cartesian3[][] = []
-  if (maskTris.size) {
-    for (const [name, tris] of maskTris) {
-      let rings: [number, number][][]
-      if (tris.length > FOOT_MAX_TRIS_UNION) { const cf = concaveFootprint(tris.flat()); rings = cf ? [cf] : []; console.warn(`Maska „${name}": ${tris.length} trojúhelníků je moc na přesný obrys → použit konkávní obal`) }
-      else rings = unionOutlines(tris)
-      for (const r of rings) { const simp = simplifyRingCapped(r); if (simp) footprint.push(simp.map(([e, n]) => enToWorld(e, n))) }
-    }
-  } else {
-    const ring = concaveFootprint(allPts)
-    if (ring) footprint.push(ring.map(([e, n]) => enToWorld(e, n)))
-  }
-  return { url, anchor, bottomZ: Number.isFinite(minU) ? minU : 0, footprint: footprint.length ? footprint : null }
-}
-
-/** Test bod-v-polygonu (ray casting); ring = [[lon,lat], …]. */
-function pointInRing(lon: number, lat: number, ring: number[][]): boolean {
-  let inside = false
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i], [xj, yj] = ring[j]
-    if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside
-  }
-  return inside
-}
-
-function ringCentroid(ring: number[][]): [number, number] {
-  let sx = 0, sy = 0
-  for (const [x, y] of ring) { sx += x; sy += y }
-  return [sx / ring.length, sy / ring.length]
-}
-
-// ── Správní jednotky (kraj/okres/obec + k.ú.) z ČÚZK RÚIAN (ArcGIS REST) ─────────────────
-// RÚIAN MapServer má vrstvy s názvy i kódy a jde dotazovat bodem/jménem/kódem obce.
-type AdminUnit = { level: string; name: string; kod: number; layer: number; obec?: number; rings?: [number, number][][] }
-const RUIAN = 'https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/MapServer'
-const RUIAN_LEVELS: [number, string][] = [[17, 'Kraj'], [15, 'Okres'], [12, 'Obec']] // od největší po nejmenší
-
-/** Dotaz na RÚIAN vrstvu (Esri JSON, geometrie v S-JTSK). geom=true → i prstence. */
-async function ruianQuery(layer: number, where: string, geom: boolean): Promise<Array<{ kod: number; nazev: string; obec?: number; rings: [number, number][][] }>> {
-  const url = `${RUIAN}/${layer}/query?where=${encodeURIComponent(where)}&outFields=kod,nazev&returnGeometry=${geom}&outSR=5514&f=json`
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`RÚIAN: HTTP ${res.status}`)
-  const data = await res.json() as { features?: Array<{ attributes?: { kod?: number; nazev?: string; obec?: number }; geometry?: { rings?: number[][][] } }> }
-  const out: Array<{ kod: number; nazev: string; obec?: number; rings: [number, number][][] }> = []
-  for (const f of data.features || []) {
-    const rings = (f.geometry?.rings || []).filter(r => r.length >= 3).map(r => r.map(([x, y]) => [x, y] as [number, number]))
-    out.push({ kod: Number(f.attributes?.kod), nazev: (f.attributes?.nazev || '').trim(), obec: f.attributes?.obec, rings })
-  }
-  return out
-}
-/** Bodový dotaz na vrstvu (jednotka obsahující bod) — bez geometrie, jen název+kód (rychlé). */
-async function ruianAtPoint(layer: number, lon: number, lat: number): Promise<{ kod: number; nazev: string } | null> {
-  const url = `${RUIAN}/${layer}/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=kod,nazev&returnGeometry=false&f=json`
-  const res = await fetch(url); if (!res.ok) throw new Error(`RÚIAN: HTTP ${res.status}`)
-  const data = await res.json() as { features?: Array<{ attributes?: { kod?: number; nazev?: string } }> }
-  const a = data.features?.[0]?.attributes
-  return a?.nazev ? { kod: Number(a.kod), nazev: a.nazev.trim() } : null
-}
-
-/** Kraj/okres/obec obsahující bod (bez geometrie — ta se dotáhne až při výběru). */
-async function fetchAdminUnits(lon: number, lat: number): Promise<AdminUnit[]> {
-  const out: AdminUnit[] = []
-  for (const [layer, level] of RUIAN_LEVELS) {
-    try { const u = await ruianAtPoint(layer, lon, lat); if (u) out.push({ level, name: u.nazev, kod: u.kod, layer, obec: level === 'Obec' ? u.kod : undefined }) } catch { /* přeskoč */ }
-  }
-  return out
-}
-/** Katastrální území dané obce (kód obce) — názvy + kódy, bez geometrie. */
-async function fetchAdminParts(obecKod: number): Promise<AdminUnit[]> {
-  const ku = await ruianQuery(7, `obec=${obecKod}`, false)
-  return ku.filter(u => u.nazev).map(u => ({ level: 'k.ú.', name: u.nazev, kod: u.kod, layer: 7 }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'cs'))
-}
-/** Dotáhne prstence (S-JTSK) jednotky podle vrstvy+kódu. */
-async function fetchAdminGeom(layer: number, kod: number): Promise<[number, number][][]> {
-  const r = await ruianQuery(layer, `kod=${kod}`, true)
-  return r[0]?.rings || []
-}
-
-/**
- * Z kliku najde katastrální parcelu (ČÚZK WFS, GeoJSON v S-JTSK) a vrátí obrys ve WGS84.
- * Stáhne víc kandidátů (BBOX matchuje obálky) a vybere tu, jejíž geometrie bod opravdu obsahuje.
- */
-async function fetchParcelAt(lon: number, lat: number): Promise<Parcel | null> {
-  // ~10 m bbox, víc kandidátů; BBOX se NEkóduje (ČÚZK chce literální čárky/dvojtečky)
-  const d = 0.0001
-  const bbox = `${lat - d},${lon - d},${lat + d},${lon + d},urn:ogc:def:crs:EPSG::4326`
-  const url = `https://services.cuzk.cz/wfs/inspire-cp-wfs.asp?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=cp:CadastralParcel&COUNT=10&OUTPUTFORMAT=application/json&BBOX=${bbox}`
-  try {
-    const res = await fetch(url)
-    const data = await res.json() as { features?: Array<{ geometry: { type: string; coordinates: unknown }; properties?: Record<string, unknown> }> }
-    const feats = data.features ?? []
-    if (!feats.length) return null
-    // přepočítej obrysy kandidátů na WGS84 (S-JTSK → WGS84)
-    const cands = feats.map(f => {
-      const rings: number[][][] = []
-      if (f.geometry.type === 'Polygon') rings.push((f.geometry.coordinates as number[][][])[0])
-      else if (f.geometry.type === 'MultiPolygon') for (const poly of (f.geometry.coordinates as number[][][][])) rings.push(poly[0])
-      const wgs = rings.map(r => r.map(([x, y]) => proj4('EPSG:5514', 'EPSG:4326', [x, y]) as [number, number]))
-      return { id: String(f.properties?.id ?? ''), wgs }
-    }).filter(c => c.wgs.length > 0)
-    if (!cands.length) return null
-    // vyber tu, jejíž geometrie bod skutečně obsahuje; jinak nejbližší podle těžiště
-    let chosen = cands.find(c => c.wgs.some(r => pointInRing(lon, lat, r)))
-    if (!chosen) {
-      let best = Infinity
-      for (const c of cands) {
-        const [cx, cy] = ringCentroid(c.wgs[0])
-        const dist = (cx - lon) ** 2 + (cy - lat) ** 2
-        if (dist < best) { best = dist; chosen = c }
-      }
-    }
-    if (!chosen) return null
-    const positions = chosen.wgs[0].map(([lo, la]) => Cesium.Cartesian3.fromDegrees(lo, la))
-    return { id: chosen.id, positions }
-  } catch {
-    return null
-  }
-}
-
-type RawParcel = { id: string; ring: number[][] } // ring je surová geometrie v S-JTSK (EPSG:5514)
-
-/** Všechny katastrální parcely v bboxu (surová S-JTSK geometrie, pro výběr oblastí polygonem).
- *  ČÚZK WFS ignoruje STARTINDEX, ale respektuje vysoký COUNT → jeden dotaz. Reprojekci děláme až u volajícího
- *  (jen těžiště pro test, plnou geometrii pro vybrané) — reprojektovat tisíce parcel celé je zbytečně drahé. */
-async function fetchParcelsInBbox(minLon: number, minLat: number, maxLon: number, maxLat: number): Promise<RawParcel[]> {
-  const bbox = `${minLat},${minLon},${maxLat},${maxLon},urn:ogc:def:crs:EPSG::4326`
-  const url = `https://services.cuzk.cz/wfs/inspire-cp-wfs.asp?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=cp:CadastralParcel&COUNT=30000&OUTPUTFORMAT=application/json&BBOX=${bbox}`
-  const out: RawParcel[] = []
-  try {
-    const data = await (await fetch(url)).json() as { features?: Array<{ id?: string; geometry: { type: string; coordinates: unknown }; properties?: Record<string, unknown> }> }
-    for (const f of data.features ?? []) {
-      let ring: number[][] | null = null
-      if (f.geometry.type === 'Polygon') ring = (f.geometry.coordinates as number[][][])[0]
-      else if (f.geometry.type === 'MultiPolygon') ring = (f.geometry.coordinates as number[][][][])[0][0]
-      if (!ring) continue
-      out.push({ id: String(f.properties?.id ?? f.id ?? ''), ring })
-    }
-  } catch { /* ignore */ }
-  return out
-}
-
-// Katastrální území statutárního města Liberec (26) — kód k.ú. (RÚIAN) → název.
-// Kód = `properties.id` z WFS cp:CadastralZoning; filtrujeme jimi „jen pod Libercem".
-const LIBEREC_KU: Record<string, string> = {
-  '682039': 'Liberec', '682144': 'Ruprechtice', '682161': 'Nové Pavlovice', '682179': 'Staré Pavlovice',
-  '682209': 'Růžodol I', '682233': 'Františkov u Liberce', '682241': 'Janův Důl u Liberce', '682250': 'Horní Růžodol',
-  '682268': 'Dolní Hanychov', '682314': 'Rochlice u Liberce', '682390': 'Starý Harcov', '682438': 'Kateřinky u Liberce',
-  '682446': 'Rudolfov', '682462': 'Horní Hanychov', '682471': 'Ostašov u Liberce', '682489': 'Horní Suchá u Liberce',
-  '682497': 'Karlinky', '673641': 'Krásná Studánka', '673650': 'Radčice u Krásné Studánky', '631086': 'Doubí u Liberce',
-  '631094': 'Hluboká u Liberce', '631108': 'Pilínkov', '780472': 'Vesec u Liberce', '785628': 'Kunratice u Liberce',
-  '785644': 'Vratislavice nad Nisou', '689823': 'Machnín',
-}
-
-type District = { code: string; name: string; rings: Cesium.Cartesian3[][] }
-
-const AURORA_HEIGHT_M = 220 // jak vysoko stoupá „polární záře" nad terén
-const AURORA_LABEL_LIFT_M = 90 // popisek pluje kousek nad září
-// o kolik zapustit základnu pod terén: kryje nesoulad výšek DMR (základna) vs. zobrazeného povrchu
-// (hlavně Google 3D realita se liší i o desítky metrů). Zapuštěná část je pod zemí, glow začíná u povrchu.
-const AURORA_SINK_M = 50
-
-// Shaderový materiál záře: svislý fade (dole sytě → nahoru mizí) + stoupající vlny (nahoru/dolů) — GPU, plynulé.
-// st.t = 0 u základny stěny, 1 nahoře. czm_frameNumber pohání animaci (viewer renderuje kontinuálně).
-function auroraMaterial(color: Cesium.Color, phase: number): Cesium.Material {
-  return new Cesium.Material({
-    translucent: true,
-    fabric: {
-      uniforms: { uColor: color, uPhase: phase },
-      source: `
-        czm_material czm_getMaterial(czm_materialInput materialInput) {
-          czm_material m = czm_getDefaultMaterial(materialInput);
-          float v = clamp(materialInput.st.t, 0.0, 1.0);
-          float s = materialInput.st.s;                                     // 0..1 podél délky stěny
-          float fade = pow(1.0 - v, 1.3);                                   // sytě dole, mizí nahoru
-          // fáze posunutá i podél délky (s) → vlna dojede nahoru na každém místě jindy (diagonální vlnění)
-          float wave = 0.5 + 0.5 * sin(v * 9.0 - czm_frameNumber * 0.03 + uPhase + s * 22.0);
-          m.diffuse = uColor.rgb;
-          m.emission = uColor.rgb * 0.25;
-          m.alpha = uColor.a * fade * (0.4 + 0.6 * wave);
-          return m;
-        }
-      `,
-    },
-  })
-}
-
-/** Uzavřený obrys zhladí Catmull-Rom splinem — místo lomené čáry plynulá křivka (hladší stěna záře). */
-function smoothClosedRing(pts: [number, number][], stepsPerSeg: number): [number, number][] {
-  const n = pts.length
-  if (n < 3) return pts
-  const cr = (p0: number, p1: number, p2: number, p3: number, t: number) => {
-    const t2 = t * t, t3 = t2 * t
-    return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
-  }
-  const out: [number, number][] = []
-  for (let i = 0; i < n; i++) {
-    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n]
-    for (let s = 0; s < stepsPerSeg; s++) {
-      const t = s / stepsPerSeg
-      out.push([cr(p0[0], p1[0], p2[0], p3[0], t), cr(p0[1], p1[1], p2[1], p3[1], t)])
-    }
-  }
-  return out
-}
-
-/** Katastrální území Liberce z ČÚZK WFS (CadastralZoning), filtrovaná na obec Liberec dle LIBEREC_KU. */
-async function fetchLiberecDistricts(): Promise<District[]> {
-  const bbox = '50.68,14.94,50.83,15.15,urn:ogc:def:crs:EPSG::4326'
-  const url = `https://services.cuzk.cz/wfs/inspire-cp-wfs.asp?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=cp:CadastralZoning&COUNT=300&OUTPUTFORMAT=application/json&BBOX=${bbox}`
-  const out: District[] = []
-  try {
-    const data = await (await fetch(url)).json() as { features?: Array<{ properties?: { id?: number | string }; geometry: { type: string; coordinates: unknown } }> }
-    for (const f of data.features ?? []) {
-      const code = String(f.properties?.id ?? '')
-      const name = LIBEREC_KU[code]
-      if (!name) continue
-      const ringsRaw: number[][][] = []
-      if (f.geometry.type === 'Polygon') ringsRaw.push((f.geometry.coordinates as number[][][])[0])
-      else if (f.geometry.type === 'MultiPolygon') for (const poly of (f.geometry.coordinates as number[][][][])) ringsRaw.push(poly[0])
-      const rings = ringsRaw.filter(r => r && r.length >= 3).map(r => r.map(([x, y]) => {
-        const [lo, la] = proj4('EPSG:5514', 'EPSG:4326', [x, y]) as [number, number]
-        return Cesium.Cartesian3.fromDegrees(lo, la)
-      }))
-      if (rings.length) out.push({ code, name, rings })
-    }
-  } catch { /* ignore */ }
-  return out
-}
+import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload, Move, Crosshair, Trash2, ArrowDownToLine, RotateCcw, MapPin, Mountain, Download, Eye, EyeOff, Hexagon, Check, Sparkles, Grid3x3, X, ChevronRight, ChevronLeft, ChevronDown, Landmark, Camera, Play, Ruler } from 'lucide-react'
+import {
+  ION_TOKEN, isAbortError, ENABLE_GOOGLE_3D, ENABLE_OSM_BUILDINGS, ENABLE_LIBEREC_DISTRICTS, NEEDS_ION,
+  GOOGLE_3D_ION_ASSET, SPLAT_ASSET_ID, SPLAT_ANCHOR, SPLAT_BASE_ROLL, SPLAT_PLACEMENT_KEY, SPLAT_ON_KEY,
+  BG_KEY, BG_CUSTOM_KEY, SHAKE_KEY, SHAKE_MAX_DEG, ZOOM_SENS, ZOOM_TAU, ZOOM_MAX,
+  CR_EXTENT, LIBEREC_EXTENT, GEOID_CZ, GOOGLE_LIFT_M, MAX_GLB_YAW_DEG, OSM_LIFT_M, MODEL_GLOW, EMPTY_NAMESET,
+} from './config'
+import type {
+  Base, Placement, CamLook, CamView, Parcel, Anchor, ModelEntry, SceneObj, DrawLayer, DrawingEntry,
+} from './types'
+import { CachedWmsOrtho, WMS_TILE, LOCAL_TILES, bakedKeys, ortofotoProvider, ZTM_TIERS, ztmProvider, pickZtmTier, katastrProvider } from './imagery'
+import { makeDmrTerrain } from './terrain'
+import { fetchElevSampler, fetchElevSamplerSJTSK } from './elevation'
+import { simplifyRingCapped, pointInRing, ringCentroid } from './rings'
+import { MEASURE_MAX_EDGES, MEASURE_MIN_EDGE, measureRing, fmtArea, type ParcelMeasure } from './measure'
+import { ruianQuery, fetchAdminUnits, fetchAdminParts, fetchAdminGeom, fetchParcelAt, fetchParcelsInBbox, type AdminUnit } from './katastr'
+import { AURORA_HEIGHT_M, AURORA_LABEL_LIFT_M, AURORA_SINK_M, auroraMaterial, smoothClosedRing, fetchLiberecDistricts } from './districts'
+import { pickGround, pickTerrain, viewCenterGround, buildMatrix } from './sceneUtils'
+import { getGltfLoader, glbBin, gltfImage, textureImageIndex, computeBottomZ, georeferenceSjtskGlb, type GltfJson, type GltfParser } from './model3d'
+import { parseAnchor, download, anchorFilename, buildDxf, buildDxfLayers, buildingsObjChunk } from './exportUtils'
+import { fetchKatastrPolylines, fetchKatastrDxf } from './export/katastrDxf'
+import { stitchMapsCore, fetchOrthoTexture } from './export/maps'
+import { NumRow, Section, ToggleBtn } from './ui'
 
 export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -855,11 +60,88 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const modelsRef = useRef<Map<string, ModelEntry>>(new Map())
   const selectedIdRef = useRef<string | null>(null)
   // multi-parcela: vybrané parcely (klíč = id parcely)
-  const parcelsRef = useRef<Map<string, { positions: Cesium.Cartesian3[]; ring: number[][]; ents: Cesium.Entity[] }>>(new Map())
+  const parcelsRef = useRef<Map<string, { positions: Cesium.Cartesian3[]; ring: number[][]; holes: number[][][]; knArea: number; ents: Cesium.Entity[]; hidden?: boolean }>>(new Map())
+  // popisky měření (kóty stran + výměra) po parcelách — mimo p.ents, ať jdou zhasnout zvlášť od zvýraznění
+  const measureRef = useRef<Map<string, Cesium.Entity[]>>(new Map())
   // nahrané výkresy (DXF/DWG): čáry/popisky/body po hladinách + obalové bounds
   const drawingsRef = useRef<Map<string, DrawingEntry>>(new Map())
   const [drawH, setDrawH] = useState<Record<string, number>>({})   // svislý posun výkresu (m)
   const [drawA, setDrawA] = useState<Record<string, number>>({})   // průhlednost výkresu (0..1)
+  // kamera: uložené pohledy + DOF/FOV/bloom
+  const [camViews, setCamViews] = useState<CamView[]>(() => {
+    // Pohledy uložené dřív nemají id — doplň ho při načtení, ať se na ně popisky můžou odkazovat.
+    try { const s = localStorage.getItem('geo.camviews'); if (s) return (JSON.parse(s) as CamView[]).map((cv, i) => cv.id ? cv : { ...cv, id: `v${i}_${Date.now()}` }) } catch { /* */ }
+    return []
+  })
+  const [activeViewId, setActiveViewId] = useState<string | null>(null)   // pohled, ve kterém právě jsme
+  const [callouts, setCallouts] = useState<Callout[]>(() => { try { const s = localStorage.getItem('geo.callouts'); if (s) return JSON.parse(s) as Callout[] } catch { /* */ } return [] })
+  const [calloutMode, setCalloutMode] = useState(false)                   // klik do mapy položí popisek
+  const [calloutSel, setCalloutSel] = useState<string | null>(null)
+  const [viewerReady, setViewerReady] = useState(false)
+  // Sbalení sekcí levého panelu. Klíč chybí = použij výchozí hodnotu sekce, takže nové sekce
+  // nemusí nic doplňovat a stav přežije i jejich přejmenování.
+  // Panel překrývá levých 320 px mapy, takže musí jít odsunout — jinak se pod ním nedá klikat.
+  const [panelOpen, setPanelOpen] = useState(true)
+  // Hlavní vypínač prezentačních prvků (popisky + pulz). Při běžné práci s mapou překážejí.
+  const [presentOn, setPresentOn] = useState(true)
+  // Co bylo zapnuté, než se prezentace vypnula — aby zapnutí vrátilo přesně to, ne nějaký default.
+  const presentSnapRef = useRef<{ dofOn: boolean; bloom: boolean } | null>(null)
+  const [openSec, setOpenSec] = useState<Record<string, boolean>>(() => {
+    try { const v = localStorage.getItem('geo.opensec'); if (v) return JSON.parse(v) as Record<string, boolean> } catch { /* */ }
+    return {}
+  })
+  const toggleSec = (id: string, next: boolean) => setOpenSec(prev => {
+    const v = { ...prev, [id]: next }
+    try { localStorage.setItem('geo.opensec', JSON.stringify(v)) } catch { /* */ }
+    return v
+  })
+  // Kontextové sekce (Parcely, Dlaždice, Vybraný model…) existují jen když je co ukazovat.
+  // Sedí hned pod tím, co je vyrobilo, ale panel může být odscrollovaný jinde — po objevení
+  // je proto rozbalíme a sjedeme k nim, ať se po výběru nemusí nic hledat.
+  const panelScrollRef = useRef<HTMLDivElement>(null)
+  function revealSection(id: string) {
+    setOpenSec(prev => {
+      if (prev[id] !== false) return prev            // sbalená jen když ji uživatel sám zavřel
+      const v = { ...prev, [id]: true }
+      try { localStorage.setItem('geo.opensec', JSON.stringify(v)) } catch { /* */ }
+      return v
+    })
+    requestAnimationFrame(() => {
+      panelScrollRef.current?.querySelector(`[data-sec="${id}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  }
+  // vzhled posledně upravovaného popisku → nový ho zdědí, ať se nemusí stylovat pokaždé znovu
+  const calloutStyleRef = useRef<Pick<Callout, 'dot' | 'frame' | 'size'>>({})
+  const [pulses, setPulses] = useState<PulseSet[]>(() => { try { const s = localStorage.getItem('geo.pulses'); if (s) return JSON.parse(s) as PulseSet[] } catch { /* */ } return [] })
+  const [pulseColor, setPulseColor] = useState(PULSE_COLOR_DEFAULT)
+  const [pulseCount, setPulseCount] = useState(PULSE_COUNT_DEFAULT)
+  const pulseLayerRef = useRef<PulseLayer | null>(null)
+  const [camName, setCamName] = useState('')
+  const [dofOn, setDofOn] = useState(false)
+  // 'dist' = ostré je vše v dané vzdálenosti (vestavěná DOF), 'circle' = ostrý kruh uprostřed obrazovky
+  const [dofMode, setDofMode] = useState<'dist' | 'circle'>('circle')
+  const [dofFocal, setDofFocal] = useState(300)
+  const [dofBlur, setDofBlur] = useState(2)
+  const [dofRadius, setDofRadius] = useState(0.84)
+  const [dofFeather, setDofFeather] = useState(0.7)
+  const [fov, setFov] = useState(60)
+  const [bloomOn, setBloomOn] = useState(false)
+  const [orbitOn, setOrbitOn] = useState(true)        // přelet obloukem kolem středu pohledu (výchozí)
+  // „Kamera z ruky" — jemné chvění pohledu v prezentaci. Je součástí VZHLEDU POHLEDU (CamLook),
+  // ne globální volba: každý uložený pohled si nese vlastní zapnutí i intenzitu, takže se chvění
+  // dá dát jen na záběry, kterým sluší. Po startu je proto vždy VYPNUTÉ a čeká, až přiletíš na
+  // pohled, který ho má. V localStorage zůstává jen naposledy nastavená intenzita jako výchozí
+  // hodnota slideru — zapnutí se neukládá, aby se refreshem nikdy nevrátilo samo.
+  const [shakeOn, setShakeOn] = useState(false)
+  const [shakeAmt, setShakeAmt] = useState(() => {
+    try { const a = JSON.parse(localStorage.getItem(SHAKE_KEY) || '{}').amt; return typeof a === 'number' ? a : 0.35 } catch { return 0.35 }
+  })
+  // čte ho renderovací smyčka každý snímek → ref, ať se listenery nepřepínají při každém tahu slideru
+  const shakeRef = useRef({ on: false, amt: 0.35 })
+  const dofRef = useRef<Cesium.PostProcessStageComposite | null>(null)
+  const dofCircleRef = useRef<Cesium.PostProcessStageComposite | null>(null)
+  const orbitAnimRef = useRef(0)                       // token běžící orbit animace (pro zrušení předchozí)
+  const lookAnimRef = useRef(0)                        // totéž pro přechod vzhledu (FOV/DOF) při přeletu
   const fileRef = useRef<HTMLInputElement>(null)
   const dwgRef = useRef<HTMLInputElement>(null)
 
@@ -879,6 +161,9 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const dimTargetRef = useRef(0)              // cílová alfa
   const dimRafRef = useRef<number | null>(null)
   const [parcelHl, setParcelHl] = useState(true) // zvýraznění (tyrkys výplň+obrys) vybraných parcel
+  const [parcelMeasure, setParcelMeasure] = useState(false) // kóty délek u stran + výměra uprostřed parcely
+  // area = součet výměr z KN, mapArea = součet spočítaný z geometrie mapy
+  const [measureSum, setMeasureSum] = useState<{ area: number; mapArea: number; note: string }>({ area: 0, mapArea: 0, note: '' })
   // zvýraznění správního území (kraj/okres/obec): klik → vnořené jednotky → izolace ztlumením okolí
   const [regionMode, setRegionMode] = useState(false)
   const [regionBusy, setRegionBusy] = useState(false)
@@ -895,6 +180,15 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const [googleErr, setGoogleErr] = useState<string | null>(null)
   const [googleAlpha, setGoogleAlpha] = useState(1)               // průhlednost 3D reality (1 = plná, 0 = jen mapa pod ní)
   const [googleUnder, setGoogleUnder] = useState<'ortofoto' | 'zm' | 'none'>('none') // plochá mapa pod 3D; default 'none' = čistě 3D
+
+  // pozadí scény (kolem glóbu / pod 3D dlaždicemi) — viz background.ts
+  const [bgMode, setBgMode] = useState<BgMode>(() => {
+    try { const v = localStorage.getItem(BG_KEY); return (BG_MODES.some(m => m.id === v) ? v : 'vesmir') as BgMode } catch { return 'vesmir' }
+  })
+  const [bgCustom, setBgCustom] = useState<string>(() => {
+    try { return localStorage.getItem(BG_CUSTOM_KEY) || '#121820' } catch { return '#121820' }
+  })
+  const bgStageRef = useRef<Cesium.PostProcessStage | null>(null)
 
   // scéna: seznam objektů + vybraný + umístění vybraného modelu
   const [objects, setObjects] = useState<SceneObj[]>([])
@@ -1010,6 +304,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       contextOptions: { webgl: { preserveDrawingBuffer: true } }, // nutné pro snímky (canvas.toBlob)
     })
     viewerRef.current = viewer
+    setViewerReady(true)
+
+    // Kolečko si bere naše plynulé přiblížení (efekt „plynulé přiblížení" níž) — Cesium by na
+    // každý zářez skočilo o kus a při rychlém rolování to nadskakuje. Pravé tažení a pinch
+    // zůstávají Cesiu, tam je pohyb spojitý sám od sebe.
+    viewer.scene.screenSpaceCameraController.zoomEventTypes = [Cesium.CameraEventType.RIGHT_DRAG, Cesium.CameraEventType.PINCH]
 
     // pořadí přidání = pořadí vykreslení zdola nahoru: podklady → katastr
     const orto = viewer.imageryLayers.addImageryProvider(ortofotoProvider())
@@ -1053,6 +353,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     return () => {
       viewer.camera.changed.removeEventListener(onCamChange)
       viewerRef.current = null
+      setViewerReady(false)
       for (const e of modelsRef.current.values()) URL.revokeObjectURL(e.url)
       modelsRef.current.clear()
       if (!viewer.isDestroyed()) viewer.destroy()
@@ -1446,6 +747,15 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }
   }, [base, ztmTier, katastrOn, googleUnder, parcelClip])
 
+  // pozadí scény: hvězdy / přechod / plná barva. Řeší i barvu glóbu MIMO dostupná data
+  // (ČÚZK končí na hranicích ČR) — jinak by kolem republiky svítil obdélník.
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    applyBackground(v, bgMode, bgCustom, bgStageRef)
+    try { localStorage.setItem(BG_KEY, bgMode); localStorage.setItem(BG_CUSTOM_KEY, bgCustom) } catch { /* private mode */ }
+  }, [viewerReady, bgMode, bgCustom])
+
   // průhlednost Google 3D dlaždic (přes styl) → nižší = víc prosvítá plochá mapa pod nimi
   function applyGoogleAlpha() {
     const ts = googleRef.current
@@ -1539,7 +849,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }, Cesium.ScreenSpaceEventType.MOUSE_MOVE)
     const end = () => { if (dragging) { dragging = false; v.scene.screenSpaceCameraController.enableInputs = true } }
     handler.setInputAction(end, Cesium.ScreenSpaceEventType.LEFT_UP)
-    return () => { handler.destroy(); if (!v.isDestroyed()) v.scene.screenSpaceCameraController.enableInputs = true }
+    // `v.scene` si držíme z registrace — při zániku komponenty je viewer už zničený a getter
+    // by spadl (Viewer.isDestroyed() to nezachytí, v Cesiu vrací vždy false).
+    const ssc = v.scene.screenSpaceCameraController
+    return () => { handler.destroy(); ssc.enableInputs = true }
   }, [moveMode])
 
   // TEST: tažení splatu po terénu (posun jeho kotvy). Levé táhne splat, pravé posouvá mapu (jako dlaždice).
@@ -1549,7 +862,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     const cam = v.scene.screenSpaceCameraController
     const prevRotate = cam.rotateEventTypes, prevZoom = cam.zoomEventTypes
     cam.rotateEventTypes = [Cesium.CameraEventType.RIGHT_DRAG]
-    cam.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH]
+    cam.zoomEventTypes = [Cesium.CameraEventType.PINCH] // kolečko obsluhuje naše plynulé přiblížení
     const handler = new Cesium.ScreenSpaceEventHandler(v.scene.canvas)
     let dragging = false
     const moveTo = (screen: Cesium.Cartesian2) => { const g = pickTerrain(v, screen); if (g) updateSplat({ lon: g.lon, lat: g.lat, groundH: g.height }) }
@@ -1613,6 +926,26 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     return () => handler.destroy()
   }, [parcelMode])
 
+  // Režim přidání popisku: klik do mapy položí kotvu. Popisek se rovnou přiřadí aktivnímu pohledu,
+  // aby po vytvoření hned vyjel — jinak by uživatel udělal popisek a nic by se nestalo.
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed() || !calloutMode) return
+    const handler = new Cesium.ScreenSpaceEventHandler(v.scene.canvas)
+    handler.setInputAction((evt: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+      const g = pickGround(v, evt.position)
+      if (!g) { toast.info('Tady se nepodařilo najít povrch'); return }
+      const p = Cesium.Cartesian3.fromDegrees(g.lon, g.lat, g.height)
+      const last = calloutStyleRef.current
+      const c: Callout = { id: `c${Date.now()}`, text: 'Nový popisek', anchor: [p.x, p.y, p.z], off: [110, -80], views: activeViewId ? [activeViewId] : [], ...last }
+      setCallouts(prev => { const next = [...prev, c]; saveCallouts(next); return next })  // funkční tvar → efekt nemusí viset na `callouts`
+      setCalloutSel(c.id)
+      setCalloutMode(false)
+      if (!activeViewId) toast.info('Popisek vznikl, ale není vybraný žádný pohled — zůstane zasunutý')
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
+    return () => handler.destroy()
+  }, [calloutMode, activeViewId])
+
   // režim výběru oblasti: každý klik přidá vrchol; polygon se dokreslí a po potvrzení vybere parcely uvnitř
   useEffect(() => {
     const v = viewerRef.current
@@ -1674,12 +1007,15 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         const [cx, cy] = ringCentroid(parcel.ring)
         const [clon, clat] = proj4('EPSG:5514', 'EPSG:4326', [cx, cy]) as [number, number]
         if (!pointInRing(clon, clat, poly)) continue
-        // vybraná parcela → teprve teď reprojektuj celou geometrii
-        const positions = parcel.ring.map(([x, y]) => {
+        // vybraná parcela → teprve teď reprojektuj celou geometrii (vnější prstenec i díry)
+        const toCart = (r: number[][]) => r.map(([x, y]) => {
           const [lo, la] = proj4('EPSG:5514', 'EPSG:4326', [x, y]) as [number, number]
           return Cesium.Cartesian3.fromDegrees(lo, la)
         })
-        addParcelSel({ id: parcel.id, positions })
+        addParcelSel({
+          id: parcel.id, label: parcel.label, knArea: parcel.knArea,
+          positions: toCart(parcel.ring), holes: parcel.holes.map(toCart),
+        })
       }
     } finally {
       setAreaLoading(false)
@@ -1707,12 +1043,13 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     let lastPx: Cesium.Cartesian2 | null = null
 
     // Levé tlačítko si bere malování, jenže tím Cesiu bereme otáčení mapy — bez tohohle by
-    // v režimu dlaždic nešlo popojet. Posun tedy na pravé, zoom zůstává kolečku.
+    // v režimu dlaždic nešlo popojet. Posun tedy na pravé, zoom zůstává kolečku (obsluhuje
+    // ho naše plynulé přiblížení, Cesiu tu zůstává jen pinch).
     const cam = v.scene.screenSpaceCameraController
     const prevRotate = cam.rotateEventTypes
     const prevZoom = cam.zoomEventTypes
     cam.rotateEventTypes = [Cesium.CameraEventType.RIGHT_DRAG]
-    cam.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH]
+    cam.zoomEventTypes = [Cesium.CameraEventType.PINCH]
 
     const paintAt = (screen: Cesium.Cartesian2) => {
       // pickTerrain (ray na globus) je proti pickGround levnější — nedělá readback hloubky,
@@ -1905,59 +1242,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     redrawGrid()
     if (!gridOn) return
     const off = () => redrawGrid()
-    v.camera.moveEnd.addEventListener(off)
-    return () => { v.camera.moveEnd.removeEventListener(off); clearGrid() }
+    // událost si držíme z registrace, ať cleanup nesahá na getter zničeného viewru (viz výše)
+    const moveEnd = v.camera.moveEnd
+    moveEnd.addEventListener(off)
+    return () => { moveEnd.removeEventListener(off); clearGrid() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gridOn, tileSize])
-
-  /**
-   * Hranice parcel (katastr) pro obálku dlaždic → DXF v REÁLNÉM S-JTSK, výšky z DMR.
-   * Sedí to na terén i OBJ bez přepočtu: WFS vrací parcely rovnou v EPSG:5514 (stejná soustava
-   * jako vrcholy dlaždic) a DMR výšky jsou Bpv (stejné jako Z terénu). Vrací DXF text + počet parcel.
-   */
-  /**
-   * Jádro katastru: parcely v S-JTSK obálce → 3D křivky (raw S-JTSK, výšky z DMR). Volitelný
-   * `filter` (S-JTSK polygony území) nechá jen parcely, jejichž těžiště leží uvnitř. Vrací i
-   * vzorkovač výšek `sampleZ`, aby na týž terén šel drapovat i obrys území ve stejném rámci.
-   */
-  async function fetchKatastrPolylines(minX: number, minY: number, maxX: number, maxY: number, filter?: [number, number][][]):
-    Promise<{ polylines: [number, number, number][][]; count: number; sampleZ: (x: number, y: number) => number } | null> {
-    // S-JTSK obálka → lon/lat bbox pro WFS
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity
-    for (const [x, y] of [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]] as [number, number][]) {
-      const [lo, la] = wgsOf(x, y)
-      minLon = Math.min(minLon, lo); maxLon = Math.max(maxLon, lo); minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la)
-    }
-    const parcels = await fetchParcelsInBbox(minLon, minLat, maxLon, maxLat)
-    if (!parcels.length) return null
-
-    const span = Math.max(maxX - minX, maxY - minY)
-    const size = Math.min(2048, Math.max(512, Math.ceil(span / 5)))
-    const sampler = await fetchElevSampler('dmr5g', minLon, minLat, maxLon, maxLat, size)
-    // náhradní výška pro místa bez DMR dat (kraje) — vzorek ze středu
-    const [cLon, cLat] = wgsOf((minX + maxX) / 2, (minY + maxY) / 2)
-    const fallbackH = sampler(cLon, cLat) ?? 0
-    const sampleZ = (x: number, y: number): number => { const [lo, la] = wgsOf(x, y); return sampler(lo, la) ?? fallbackH }
-
-    const polylines: [number, number, number][][] = []
-    for (const p of parcels) {
-      const ring = p.ring.slice()
-      // DXF uzavře smyčku sám (flag), tak zahoď duplicitní koncový bod
-      if (ring.length > 1) { const a = ring[0], b = ring[ring.length - 1]; if (Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6) ring.pop() }
-      if (ring.length < 3) continue
-      // filtr na tvar území (těžiště uvnitř některého prstence) — pro vyhledané k.ú./obec,
-      // ať v DXF nejsou i sousední parcely z rohů obdélníkové obálky
-      if (filter) { const [cx, cy] = ringCentroid(ring); if (!filter.some(fr => pointInRing(cx, cy, fr))) continue }
-      polylines.push(ring.map(([x, y]) => [x, y, sampleZ(x, y)] as [number, number, number]))
-    }
-    if (!polylines.length) return null
-    return { polylines, count: polylines.length, sampleZ }
-  }
-
-  async function fetchKatastrDxf(minX: number, minY: number, maxX: number, maxY: number): Promise<{ dxf: string; count: number } | null> {
-    const r = await fetchKatastrPolylines(minX, minY, maxX, maxY)
-    return r ? { dxf: buildDxf(r.polylines), count: r.count } : null
-  }
 
   /**
    * Vyveze vybrané dlaždice jako zip: teren.obj + teren.mtl + JPEG na dlaždici.
@@ -2111,48 +1401,6 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }
   }
 
-  // Spojená 2D mapa přes obálku výběru: ortofoto i topo mapa jako jeden georeferencovaný obrázek.
-  // Stahuje se po velkých blocích (ne po dlaždicích) → stylovaná topo mapa nemá ořezané popisky
-  // na švech. Výsledek je zastropovaný (paměť canvasu); u velké oblasti klesne rozlišení.
-  const STITCH_CHUNK_PX = 4096  // strop ČÚZK REST na jeden požadavek
-  const STITCH_RES_M = 0.2      // cílové rozlišení (ortofoto má nativně 20 cm/px)
-  const STITCH_MAX_AREA = 16384 * 16384 // pojistka na paměť canvasu (~1 GB), ať to nespadne
-  const TOPO_MAX_PX = 4096      // topo mapa je jen orientační podklad → vždy menší (a ZTM míň zlobí)
-
-  /**
-   * Stáhne jeden blok mapy jako ImageBitmap — s ověřením a opakováním. ČÚZK ArcGIS (hlavně ZTM)
-   * u větších/paralelních požadavků občas vrátí 200 s prázdným (bílým) obrázkem. Velikost je na
-   * detekci nepoužitelná (chyba mívá i 3 MB, reálný list i 10 kB), spolehlivé je jen to, že prázdná
-   * mapa je JEDNOLITÁ plocha → zmenšíme na 16×16 a změříme rozptyl. Reálná mapa má obrovský.
-   */
-  async function loadMapChunk(url: string, signal?: AbortSignal): Promise<ImageBitmap> {
-    const probe = document.createElement('canvas'); probe.width = 16; probe.height = 16
-    const pctx = probe.getContext('2d', { willReadFrequently: true })
-    let lastErr: unknown = null
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      if (signal?.aborted) throw new DOMException('Zrušeno', 'AbortError')
-      try {
-        const res = await fetch(url, { signal })
-        const ct = res.headers.get('content-type') || ''
-        if (!res.ok || !ct.startsWith('image/')) throw new Error(`HTTP ${res.status} (${ct || 'bez typu'})`)
-        const bmp = await createImageBitmap(await res.blob())
-        if (pctx) {
-          pctx.clearRect(0, 0, 16, 16)
-          pctx.drawImage(bmp, 0, 0, 16, 16)
-          const d = pctx.getImageData(0, 0, 16, 16).data
-          let mn = 255, mx = 0
-          for (let i = 0; i < d.length; i += 4) { const v = (d[i] + d[i + 1] + d[i + 2]) / 3; if (v < mn) mn = v; if (v > mx) mx = v }
-          if (mx - mn < 6) { bmp.close?.(); throw new Error('prázdný/jednolitý obrázek (výpadek ČÚZK)') }
-        }
-        return bmp
-      } catch (e) {
-        if (isAbortError(e) || signal?.aborted) throw e // uživatel zrušil → nezkoušet znovu
-        lastErr = e
-        if (attempt < 4) await new Promise(r => setTimeout(r, 500 * attempt)) // narůstající pauza
-      }
-    }
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
-  }
 
   // Stáhne ortofoto vybrané oblasti NATRVALO do prohlížeče (IndexedDB, připnuté). Používá GEOGRAPHIC
   // dlaždice STEJNÉ soustavy jako WMS (klíč owms/level/x/y) → po stažení se ta oblast bere z cache,
@@ -2374,7 +1622,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       for (const t of tiles) { ix0 = Math.min(ix0, t.ix); ix1 = Math.max(ix1, t.ix); iy0 = Math.min(iy0, t.iy); iy1 = Math.max(iy1, t.iy) }
       const minX = ix0 * tileSize, maxX = (ix1 + 1) * tileSize
       const minY = iy0 * tileSize, maxY = (iy1 + 1) * tileSize
-      await stitchMapsCore(minX, minY, maxX, maxY, ac.signal, (d, t, m) => { setTilePct(d / t); setTileProgress(m) })
+      await stitchMapsCore(minX, minY, maxX, maxY, ac.signal, (d, t, m) => { setTilePct(d / t); setTileProgress(m) }, stitchMax)
     } catch (e) {
       if (isAbortError(e)) { toast.info('Export zrušen'); return }
       console.error('Export spojené mapy selhal:', e)
@@ -2398,7 +1646,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
       for (const r of a.sjtskRings) for (const [x, y] of r) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y }
       // ořez přesně na tvar území (jako výřez terénu) → PNG s alfou, okolí průhledné
-      await stitchMapsCore(minX, minY, maxX, maxY, ac.signal, (d, t, m) => { setCutoutPct(d / t); setCutoutProgress(m) }, a.sjtskRings)
+      await stitchMapsCore(minX, minY, maxX, maxY, ac.signal, (d, t, m) => { setCutoutPct(d / t); setCutoutProgress(m) }, stitchMax, a.sjtskRings)
     } catch (e) {
       if (isAbortError(e)) { toast.info('Export zrušen'); return }
       console.error('Export mapy území selhal:', e)
@@ -2409,115 +1657,6 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       setCutoutProgress('')
       setCutoutPct(-1)
     }
-  }
-
-  // jádro spojené 2D mapy (ortofoto + topo) přes zadanou S-JTSK obálku → zip s georef. obrázky (world file).
-  // `clip` (S-JTSK prstence) = ořezat výstup přesně na ten tvar (průhledno kolem) → ortofoto pak jde
-  // do PNG s alfou (JPEG průhlednost neumí), stejně jako výřez terénu. World file zůstává na obálce.
-  async function stitchMapsCore(minX: number, minY: number, maxX: number, maxY: number, signal: AbortSignal, report: (done: number, total: number, msg: string) => void, clip?: [number, number][][]) {
-      const spanX = maxX - minX, spanY = maxY - minY
-      const tier = pickTopoTier(Math.max(spanX, spanY))
-      const clipMode = !!(clip && clip.length)
-
-      // Rozměr výstupu na vrstvu: ortofoto je hlavní (plný strop), topo jen orientační podklad
-      // (menší strop) → míň/menší ZTM požadavků = rychlejší a spolehlivější (ZTM zlobí nejvíc).
-      const dims = (cap: number) => {
-        const nW = spanX / STITCH_RES_M, nH = spanY / STITCH_RES_M
-        let sc = Math.min(1, cap / Math.max(nW, nH))
-        if (nW * sc * nH * sc > STITCH_MAX_AREA) sc = Math.sqrt(STITCH_MAX_AREA / (nW * nH))
-        return { W: Math.max(1, Math.round(nW * sc)), H: Math.max(1, Math.round(nH * sc)), sc }
-      }
-      const bounds = (len: number, n: number) => Array.from({ length: n + 1 }, (_, i) => Math.round(i * len / n))
-
-      const canvas = document.createElement('canvas')
-      const ctx = canvas.getContext('2d')
-      if (!ctx) throw new Error('Canvas 2D kontext se nepodařilo získat')
-
-      const files: Record<string, Uint8Array | [Uint8Array, { level: number }]> = {}
-      const toBytes = async (mime: string, quality?: number): Promise<Uint8Array> => {
-        const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, mime, quality))
-        if (!blob) throw new Error('canvas.toBlob selhal')
-        return new Uint8Array(await blob.arrayBuffer())
-      }
-
-      // ve výřezovém režimu musí i ortofoto nést alfu → PNG (.png/.pgw); jinak zůstává úsporný JPEG
-      const layers: { layer: MapLayer; file: string; mime: string; wfile: string; cap: number; q?: number }[] = [
-        clipMode
-          ? { layer: 'ortofoto', file: 'ortofoto.png', mime: 'image/png', wfile: 'ortofoto.pgw', cap: stitchMax }
-          : { layer: 'ortofoto', file: 'ortofoto.jpg', mime: 'image/jpeg', wfile: 'ortofoto.jgw', cap: stitchMax, q: 0.9 },
-        { layer: 'topo', file: 'topografie.png', mime: 'image/png', wfile: 'topografie.pgw', cap: TOPO_MAX_PX },
-      ]
-      // spočítej celkový počet bloků pro průběh
-      const layerPlan = layers.map(L => { const d = dims(L.cap); return { L, ...d, nCols: Math.ceil(d.W / STITCH_CHUNK_PX), nRows: Math.ceil(d.H / STITCH_CHUNK_PX) } })
-      let done = 0
-      const total = layerPlan.reduce((s, p) => s + p.nCols * p.nRows, 0)
-      const meta: Record<string, { W: number; H: number; cm: number; native: boolean }> = {}
-
-      for (const { L, W, H, sc, nCols, nRows } of layerPlan) {
-        canvas.width = W; canvas.height = H
-        ctx.clearRect(0, 0, W, H)
-        const cx = bounds(W, nCols), cy = bounds(H, nRows)
-        const chunks: { c: number; r: number }[] = []
-        for (let r = 0; r < nRows; r++) for (let c = 0; c < nCols; c++) chunks.push({ c, r })
-        // souběh jen 2 — ČÚZK ArcGIS je při paralelní zátěži nespolehlivý (proto ty výpadky)
-        const imgs = await pool(chunks, 2, async ({ c, r }) => {
-          const pxW = cx[c + 1] - cx[c], pxH = cy[r + 1] - cy[r]
-          // blok v S-JTSK (pixelové hranice → poměrná část obálky); sever = horní okraj
-          const bx0 = minX + spanX * cx[c] / W, bx1 = minX + spanX * cx[c + 1] / W
-          const by1 = maxY - spanY * cy[r] / H, by0 = maxY - spanY * cy[r + 1] / H
-          const bmp = await loadMapChunk(mapBboxUrl(bx0, by0, bx1, by1, pxW, pxH, L.layer, tier), signal)
-          done++
-          report(done, total, `mapa ${done}/${total}`)
-          return { c, r, bmp, pxW, pxH }
-        })
-        for (const { c, r, bmp, pxW, pxH } of imgs) { ctx.drawImage(bmp, cx[c], cy[r], pxW, pxH); bmp.close?.() }
-        if (clipMode) {
-          // ořez na tvar: nakresli polygon(y) území a nech jen to, co je uvnitř (zbytek průhledný)
-          ctx.save()
-          ctx.globalCompositeOperation = 'destination-in'
-          ctx.beginPath()
-          for (const ring of clip!) {
-            ring.forEach(([x, y], k) => {
-              const px = (x - minX) / spanX * W, py = (maxY - y) / spanY * H
-              if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
-            })
-            ctx.closePath()
-          }
-          ctx.fillStyle = '#000'
-          ctx.fill('evenodd') // even-odd zvládne i díry / více oddělených částí území
-          ctx.restore()
-        }
-        files[L.file] = [await toBytes(L.mime, L.q), { level: 0 }] // obrázky už komprimované
-        // world file (na vlastní rozměr vrstvy): pixel → S-JTSK, levý-horní pixel = SZ roh
-        const psX = spanX / W, psY = spanY / H
-        files[L.wfile] = strToU8([psX, 0, 0, -psY, minX + psX / 2, maxY - psY / 2].map(n => n.toFixed(6)).join('\n') + '\n')
-        meta[L.layer] = { W, H, cm: spanX / W * 100, native: sc >= 1 }
-      }
-
-      const o = meta.ortofoto, tp = meta.topo
-      const ortoName = layers[0].file
-      files['info.txt'] = strToU8([
-        'Spojená mapa (ČÚZK) — ortofoto + topografická mapa',
-        ...(clipMode ? ['Ořezáno na tvar území (okolí průhledné) — ortofoto je PNG s alfou.'] : []),
-        '',
-        `Oblast S-JTSK (EPSG:5514): X ${minX} … ${maxX}, Y ${minY} … ${maxY}`,
-        `Rozsah: šířka ${spanX.toFixed(0)} m, výška ${spanY.toFixed(0)} m`,
-        '',
-        `${ortoName.padEnd(15)}${o.W} × ${o.H} px, ${o.cm.toFixed(1)} cm/px${o.native ? ' (nativní)' : ' (zmenšeno kvůli stropu; menší výběr = ostřejší)'}`,
-        `topografie.png: ${tp.W} × ${tp.H} px, ${tp.cm.toFixed(1)} cm/px — jen orientační podklad (${tier})`,
-        '',
-        'Obě vrstvy kryjí STEJNOU oblast, jen v jiném rozlišení — georeference je ve',
-        'world file (.jgw/.pgw) v S-JTSK, takže při stejné velikosti na scéně lícují.',
-        clipMode
-          ? 'Výřez i world file mají STEJNOU obálku → v AE dej obě na plane přes celou oblast, alfa udělá tvar.'
-          : 'GIS/CAD je umístí sám; v AE/Max dej každou na plane přes celou oblast.',
-        '',
-        `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
-      ].join('\n'))
-
-      const zipped = zipSync(files as Parameters<typeof zipSync>[0], { level: 6 })
-      download(zipped, `mapa_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
-      toast.success(`Spojená mapa: ortofoto ${o.W}×${o.H} px + topo ${tp.W}×${tp.H} px`)
   }
 
   // městské části Liberce (k.ú.) jako „polární záře" stoupající od terénu, každá vlastní barva; zap/vyp
@@ -2652,20 +1791,29 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     if (!v || v.isDestroyed()) return
     const pid = parcel.id || `p${Math.round(parcel.positions[0].x)}_${Math.round(parcel.positions[0].y)}`
     if (parcelsRef.current.has(pid)) return
-    const ring = parcel.positions.map(c => {
+    const toRing = (cs: Cesium.Cartesian3[]) => cs.map(c => {
       const cc = Cesium.Cartographic.fromCartesian(c)
       return [Cesium.Math.toDegrees(cc.longitude), Cesium.Math.toDegrees(cc.latitude)]
     })
+    const ring = toRing(parcel.positions)
+    const holeCarts = parcel.holes ?? []
+    const holes = holeCarts.map(toRing)
     const fill = v.entities.add({
       show: parcelHl,
-      polygon: { hierarchy: new Cesium.PolygonHierarchy(parcel.positions), material: Cesium.Color.CYAN.withAlpha(0.25), classificationType: Cesium.ClassificationType.BOTH },
+      // díry v hierarchii → tyrkys nepřekryje vykrojené parcely uvnitř (a lícuje s výměrou)
+      polygon: { hierarchy: new Cesium.PolygonHierarchy(parcel.positions, holeCarts.map(h => new Cesium.PolygonHierarchy(h))), material: Cesium.Color.CYAN.withAlpha(0.25), classificationType: Cesium.ClassificationType.BOTH },
     })
     const border = v.entities.add({
       show: parcelHl,
       polyline: { positions: [...parcel.positions, parcel.positions[0]], width: 3, material: Cesium.Color.CYAN, clampToGround: true },
     })
-    parcelsRef.current.set(pid, { positions: parcel.positions, ring, ents: [fill, border] })
-    upsertObj({ id: `parcel-${pid}`, kind: 'parcel', name: `Parcela ${parcel.id || ''}`.trim(), visible: true })
+    // obrys i kolem děr, ať je vidět, co je z parcely vykrojené
+    const holeBorders = holeCarts.map(h => v.entities.add({
+      show: parcelHl,
+      polyline: { positions: [...h, h[0]], width: 2, material: Cesium.Color.CYAN.withAlpha(0.7), clampToGround: true },
+    }))
+    parcelsRef.current.set(pid, { positions: parcel.positions, ring, holes, knArea: parcel.knArea ?? 0, ents: [fill, border, ...holeBorders] })
+    upsertObj({ id: `parcel-${pid}`, kind: 'parcel', name: `Parcela ${parcel.label || parcel.id || ''}`.trim(), visible: true })
     setParcelCount(parcelsRef.current.size)
     if (parcelClip !== 'off') { updateExcavation(); syncDim(true) } // ořez i ztlumení sledují výběr parcel
   }
@@ -2688,9 +1836,104 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   // zap/vyp tyrkysové zvýraznění vybraných parcel (výběr i ořez/ztlumení zůstávají) → koukat „načisto"
   function toggleParcelHighlight() {
     const nv = !parcelHl
-    for (const p of parcelsRef.current.values()) for (const e of p.ents) e.show = nv
+    for (const p of parcelsRef.current.values()) for (const e of p.ents) e.show = nv && !p.hidden
     setParcelHl(nv)
   }
+
+  // ── Měření vybraných parcel ─────────────────────────────────────────────────────
+  // Kóta (délka v m) u každé strany + výměra uprostřed parcely. Staví se znovu při každé
+  // změně výběru — parcel bývají desítky, takže je levnější přepočítat než udržovat diff.
+  function clearMeasure() {
+    const v = viewerRef.current
+    for (const ents of measureRef.current.values()) if (v && !v.isDestroyed()) for (const e of ents) v.entities.remove(e)
+    measureRef.current.clear()
+  }
+
+  function redrawMeasure() {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    clearMeasure()
+    if (!parcelMeasure) { setMeasureSum({ area: 0, mapArea: 0, note: '' }); return }
+
+    const measured: Array<{ pid: string; show: boolean; kn: number; m: ParcelMeasure }> = []
+    let edgeCount = 0, areaSum = 0, knSum = 0
+    for (const [pid, p] of parcelsRef.current) {
+      const m = measureRing(p.ring, p.holes)
+      if (!m) continue
+      measured.push({ pid, show: !p.hidden, kn: p.knArea, m })
+      edgeCount += m.edges.filter(e => e.len >= MEASURE_MIN_EDGE).length
+      areaSum += m.area
+      knSum += p.knArea || m.area // parcela bez údaje z KN (starší cache) → aspoň nezkreslí součet
+    }
+    // u velkých výběrů se kóty stran stejně slijí → vypustíme je, výměry zůstanou
+    const withEdges = edgeCount <= MEASURE_MAX_EDGES
+    setMeasureSum({ area: knSum, mapArea: areaSum, note: withEdges ? '' : `${edgeCount} stran — kóty skryté, zůstaly jen výměry` })
+
+    const lbl = (extra: Partial<Cesium.LabelGraphics.ConstructorOptions>): Cesium.LabelGraphics.ConstructorOptions => ({
+      fillColor: Cesium.Color.WHITE,
+      outlineColor: Cesium.Color.BLACK,
+      outlineWidth: 3,
+      style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+      heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      ...extra,
+    })
+
+    for (const { pid, show, kn, m } of measured) {
+      const ents: Cesium.Entity[] = []
+      if (withEdges) {
+        for (const e of m.edges) {
+          if (e.len < MEASURE_MIN_EDGE) continue
+          ents.push(v.entities.add({
+            show,
+            position: Cesium.Cartesian3.fromDegrees(e.mid[0], e.mid[1]),
+            label: lbl({
+              text: `${e.len.toFixed(2)} m`,
+              font: 'bold 15px monospace',
+              outlineWidth: 4,
+              // mírné zmenšení s odstupem (dřív 0.55 na 2 km — kóty byly z výšky nečitelné)
+              scaleByDistance: new Cesium.NearFarScalar(400, 1.0, 4000, 0.8),
+              distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 4000), // z dálky by to byla jen kaše
+            }),
+          }))
+        }
+      }
+      // Hlavní číslo = výměra ZAPSANÁ v KN (sedne na ikatastr a na list vlastnictví).
+      // Pod ním malým z mapy — to lícuje s kótami po obvodu a s DXF exportem. V územích
+      // s mapou 1:2880 se ta dvě čísla liší o jednotky procent a je fér vidět obojí.
+      const areaPos = Cesium.Cartesian3.fromDegrees(m.label[0], m.label[1])
+      ents.push(v.entities.add({
+        show,
+        position: areaPos,
+        label: lbl({
+          text: fmtArea(kn || m.area),
+          font: 'bold 14px sans-serif',
+          fillColor: Cesium.Color.fromCssColorString('#7dffb2'),
+          outlineWidth: 4,
+          scaleByDistance: new Cesium.NearFarScalar(400, 1.0, 12000, 0.5),
+        }),
+      }))
+      // druhý řádek jen když se od KN opravdu liší (jinak by tam stálo dvakrát totéž)
+      if (kn > 0 && Math.abs(m.area - kn) >= 1) {
+        ents.push(v.entities.add({
+          show,
+          position: areaPos,
+          label: lbl({
+            text: `z mapy ${fmtArea(m.area)}`,
+            font: '11px sans-serif',
+            fillColor: Cesium.Color.fromCssColorString('#cfd8dc'),
+            pixelOffset: new Cesium.Cartesian2(0, 15),
+            scaleByDistance: new Cesium.NearFarScalar(400, 1.0, 12000, 0.5),
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 6000),
+          }),
+        }))
+      }
+      measureRef.current.set(pid, ents)
+    }
+  }
+
+  // měření sleduje přepínač i každou změnu výběru (parcelCount se mění při add/remove)
+  useEffect(() => { redrawMeasure() }, [parcelMeasure, parcelCount])
 
   async function exportParcelsDxf() {
     if (parcelsRef.current.size === 0) { toast.error('Nejdřív vyber parcelu'); return }
@@ -2797,30 +2040,6 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
    * takže jedno ortofoto přes celý výběr sedí na terén 1:1.
    */
   // ortofoto textura pro výřez: do 4096 px jeden požadavek, jinak složí z ≤4096 dlaždic (ostřejší)
-  async function fetchOrthoTexture(minX: number, minY: number, maxX: number, maxY: number, longPx: number, signal: AbortSignal): Promise<Uint8Array> {
-    const spanX = maxX - minX, spanY = maxY - minY, longSpan = Math.max(spanX, spanY)
-    const W = Math.max(1, Math.round(longPx * spanX / longSpan)), H = Math.max(1, Math.round(longPx * spanY / longSpan))
-    if (W <= 4096 && H <= 4096) return await fetchJpegRetry(mapBboxUrl(minX, minY, maxX, maxY, W, H, 'ortofoto', 'ZTM250'), signal, 'Ortofoto')
-    const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H
-    const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('canvas 2D nedostupný')
-    const nCols = Math.ceil(W / 4096), nRows = Math.ceil(H / 4096)
-    const bx = Array.from({ length: nCols + 1 }, (_, i) => Math.round(i * W / nCols))
-    const by = Array.from({ length: nRows + 1 }, (_, i) => Math.round(i * H / nRows))
-    const total = nCols * nRows; let done = 0
-    for (let r = 0; r < nRows; r++) for (let c = 0; c < nCols; c++) {
-      if (signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
-      const pxW = bx[c + 1] - bx[c], pxH = by[r + 1] - by[r]
-      const x0 = minX + spanX * bx[c] / W, x1 = minX + spanX * bx[c + 1] / W
-      const yTop = maxY - spanY * by[r] / H, yBot = maxY - spanY * by[r + 1] / H
-      const bmp = await loadMapChunk(mapBboxUrl(x0, yBot, x1, yTop, pxW, pxH, 'ortofoto', 'ZTM250'), signal)
-      ctx.drawImage(bmp, bx[c], by[r], pxW, pxH); bmp.close?.()
-      setCutoutProgress(`stahuji ortofoto ${++done}/${total}…`)
-    }
-    const blob = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/jpeg', 0.92))
-    if (!blob) throw new Error('Textura ortofota selhala')
-    return new Uint8Array(await blob.arrayBuffer())
-  }
-
   async function exportParcelCutout() {
     if (parcelsRef.current.size === 0) { toast.error('Nejdřív vyber parcelu'); return }
     const polys = [...parcelsRef.current.values()].map(p => {
@@ -2890,7 +2109,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       const texLong = Math.min(8192, Math.max(1024, Math.ceil(longSpan / 0.2)))
       const texW = Math.max(1, Math.round(texLong * spanX / longSpan))
       const texH = Math.max(1, Math.round(texLong * spanY / longSpan))
-      const jpg = await fetchOrthoTexture(minX, minY, maxX, maxY, texLong, ac.signal)
+      const jpg = await fetchOrthoTexture(minX, minY, maxX, maxY, texLong, ac.signal, setCutoutProgress)
 
       // 5) triangulace každého výseku v S-JTSK, ořez hranicí, UV z polohy v bboxu
       setCutoutProgress('skládám…')
@@ -3076,23 +2295,33 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       const YUP = (Cesium.Axis as unknown as { Y_UP_TO_Z_UP: Cesium.Matrix4 }).Y_UP_TO_Z_UP // v typech chybí, runtime OK
       const world = new Cesium.Matrix4(), ecef = new Cesium.Cartesian3(), vwT = new THREE.Vector3()
       const dedup = new Map<string, number>()
-      const vChunks: string[] = [], fChunks: string[] = []
+      const vChunks: string[] = [], vtChunks: string[] = []
+      const faceByMat = new Map<string, string[]>()                            // materiál (= textura dlaždice) → f řádky
+      const texByKey = new Map<string, string>()                               // dlaždice#obrázek → jméno materiálu
+      const texFiles = new Map<string, { name: string; bytes: Uint8Array }>()  // materiál → soubor textury
       let vCount = 0, triKept = 0
-      const vIndex = (sx: number, sy: number, sz: number): number => {
-        const key = `${sx.toFixed(2)}_${sy.toFixed(2)}_${sz.toFixed(2)}`
+      // Vrchol = pozice + UV: na švech textury je stejný bod několikrát, jinak by se texturování
+      // rozsypalo. Index je společný pro v i vt, takže se do faces píše `f i/i`.
+      const vIndex = (sx: number, sy: number, sz: number, u: number, w: number): number => {
+        const key = `${sx.toFixed(2)}_${sy.toFixed(2)}_${sz.toFixed(2)}_${u.toFixed(4)}_${w.toFixed(4)}`
         let id = dedup.get(key)
-        if (id === undefined) { vChunks.push(`v ${sx.toFixed(3)} ${sy.toFixed(3)} ${sz.toFixed(3)}`); id = ++vCount; dedup.set(key, id) }
+        if (id === undefined) {
+          vChunks.push(`v ${sx.toFixed(3)} ${sy.toFixed(3)} ${sz.toFixed(3)}`)
+          vtChunks.push(`vt ${u.toFixed(6)} ${w.toFixed(6)}`)
+          id = ++vCount; dedup.set(key, id)
+        }
         return id
       }
       let done = 0
-      for (const [, tile] of uniq) {
+      for (const [url, tile] of uniq) {
         if (ac.signal.aborted) throw new DOMException('Zrušeno', 'AbortError')
         setCutoutProgress(`zpracovávám dlaždice ${done + 1}/${uniq.size}`); setCutoutPct(done / uniq.size); done++
         let buf: ArrayBuffer | undefined
         try { buf = await tile._contentResource!.clone().fetchArrayBuffer() } catch { continue }
         if (!buf) continue
-        let gltf: { scene: THREE.Object3D }
-        try { gltf = await new Promise((res, rej) => loader.parse(buf, '', g => res(g as unknown as { scene: THREE.Object3D }), rej)) } catch { continue }
+        let gltf: { scene: THREE.Object3D; parser?: GltfParser }
+        try { gltf = await new Promise((res, rej) => loader.parse(buf, '', g => res(g as unknown as { scene: THREE.Object3D; parser?: GltfParser }), rej)) } catch { continue }
+        const bin = glbBin(buf), gjson = (gltf.parser?.json ?? {}) as GltfJson
         Cesium.Matrix4.multiply(tile.computedTransform, YUP, world)
         gltf.scene.updateMatrixWorld(true)
         const meshes: THREE.Mesh[] = []
@@ -3101,31 +2330,63 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
           const g = m.geometry as THREE.BufferGeometry
           const pos = g.attributes.position as THREE.BufferAttribute | undefined
           if (!pos) continue
+          const uv = g.attributes.uv as THREE.BufferAttribute | undefined
           const idx = g.index
           const nodeMat = m.matrixWorld
           const nTri = idx ? idx.count / 3 : pos.count / 3
-          const toS = (i: number): [number, number, number] => {
+
+          const faces: string[] = []
+          const toS = (i: number): [number, number, number, number, number] => {
             vwT.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(nodeMat)
             ecef.x = vwT.x; ecef.y = vwT.y; ecef.z = vwT.z
             Cesium.Matrix4.multiplyByPoint(world, ecef, ecef)
             const carto = Cesium.Cartographic.fromCartesian(ecef)
             const lon = Cesium.Math.toDegrees(carto.longitude), lat = Cesium.Math.toDegrees(carto.latitude)
             const sj = sjtskOf(lon, lat) as number[]
-            return [sj[0], sj[1], carto.height - GEOID_CZ]
+            // glTF má počátek UV vlevo NAHOŘE, OBJ vlevo DOLE → V se překlápí
+            return [sj[0], sj[1], carto.height - GEOID_CZ, uv ? uv.getX(i) : 0, uv ? 1 - uv.getY(i) : 0]
           }
           for (let t = 0; t < nTri; t++) {
             const a = idx ? idx.getX(t * 3) : t * 3, b = idx ? idx.getX(t * 3 + 1) : t * 3 + 1, c = idx ? idx.getX(t * 3 + 2) : t * 3 + 2
             const A = toS(a), B = toS(b), C = toS(c)
             if (!inSel((A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3)) continue
-            fChunks.push(`f ${vIndex(A[0], A[1], A[2])} ${vIndex(B[0], B[1], B[2])} ${vIndex(C[0], C[1], C[2])}`)
+            const ia = vIndex(A[0], A[1], A[2], A[3], A[4]), ib = vIndex(B[0], B[1], B[2], B[3], B[4]), ic = vIndex(C[0], C[1], C[2], C[3], C[4])
+            faces.push(`f ${ia}/${ia} ${ib}/${ib} ${ic}/${ic}`)
             triKept++
           }
           g.dispose()
+          if (!faces.length) continue
+
+          // Textura až teď — z dlaždic mimo výběr by se JPEGy jen vršily v paměti.
+          // Bez UV nebo bez čitelného obrázku spadneme na jeden bílý materiál (geometrii nezahazujeme).
+          let matName = 'google_bez_textury'
+          const mat0 = Array.isArray(m.material) ? m.material[0] : m.material
+          const map = (mat0 as THREE.MeshStandardMaterial | undefined)?.map ?? null
+          const imgIdx = uv ? textureImageIndex(gltf.parser, gjson, map) : null
+          if (imgIdx !== null) {
+            const known = texByKey.get(`${url}#${imgIdx}`)
+            if (known) matName = known
+            else {
+              const im = gltfImage(gjson, bin, imgIdx)
+              if (im) {
+                matName = `google_tex_${texFiles.size}`
+                texFiles.set(matName, { name: `${matName}.${im.ext}`, bytes: im.bytes })
+                texByKey.set(`${url}#${imgIdx}`, matName)
+              }
+            }
+          }
+          const bucket = faceByMat.get(matName)
+          if (bucket) for (const f of faces) bucket.push(f)
+          else faceByMat.set(matName, faces)
         }
         await new Promise(r => setTimeout(r, 0))
       }
 
-      console.log(`Google mesh: ${uniq.size} dlaždic → ${triKept} trojúhelníků, ${vCount} vrcholů`)
+      // materiály bez jediného trojúhelníku uvnitř výběru do zipu nepatří (ani jejich textury)
+      const usedMats = [...faceByMat].filter(([, f]) => f.length)
+      const usedTex = usedMats.map(([mt]) => texFiles.get(mt)).filter((t): t is { name: string; bytes: Uint8Array } => !!t)
+      const texMB = usedTex.reduce((s, t) => s + t.bytes.length, 0) / 1048576
+      console.log(`Google mesh: ${uniq.size} dlaždic → ${triKept} trojúhelníků, ${vCount} vrcholů, ${usedTex.length} textur (${texMB.toFixed(1)} MB)`)
       if (!triKept) throw new Error('V oblasti nejsou žádné Google trojúhelníky — přibliž kameru (načtou se detailnější dlaždice) a zkus znovu')
 
       // 4) streamovaný zip (velký mesh)
@@ -3134,22 +2395,40 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       const zip = new Zip((err, dat) => { if (err) zipErr = err; else if (dat) chunks.push(dat) })
       const check = () => { if (zipErr) throw zipErr instanceof Error ? zipErr : new Error(String(zipErr)) }
       const objF = new ZipDeflate('google_mesh.obj', { level: 1 }); zip.add(objF)
-      objF.push(strToU8('o google\ng google\n'), false)
-      for (let i = 0; i < vChunks.length; i += 10000) { objF.push(strToU8(vChunks.slice(i, i + 10000).join('\n') + '\n'), false); check() }
-      for (let i = 0; i < fChunks.length; i += 10000) { objF.push(strToU8(fChunks.slice(i, i + 10000).join('\n') + '\n'), false); check() }
+      const pushLines = (L: string[]) => { for (let i = 0; i < L.length; i += 10000) { objF.push(strToU8(L.slice(i, i + 10000).join('\n') + '\n'), false); check() } }
+      objF.push(strToU8('mtllib google_mesh.mtl\no google\ng google\n'), false)
+      pushLines(vChunks)
+      pushLines(vtChunks)
+      for (const [mt, faces] of usedMats) { objF.push(strToU8(`usemtl ${mt}\n`), false); pushLines(faces) }
       objF.push(new Uint8Array(0), true); check()
+
+      // JPEGy jdou rovnou (už jsou komprimované, deflate by je jen zdržel)
+      for (const t of usedTex) { const f = new ZipPassThrough(t.name); zip.add(f); f.push(t.bytes, true); check() }
+
       const addText = (name: string, text: string) => { const d = new ZipDeflate(name, { level: 6 }); zip.add(d); d.push(strToU8(text), true); check() }
+      addText('google_mesh.mtl', usedMats.map(([mt]) => {
+        const t = texFiles.get(mt)
+        return [`newmtl ${mt}`, 'Ka 0.000 0.000 0.000', 'Kd 1.000 1.000 1.000', 'Ks 0.000 0.000 0.000', 'd 1.0', 'illum 1', ...(t ? [`map_Kd ${t.name}`] : []), ''].join('\n')
+      }).join('\n'))
+      if (usedTex.length) addText('vray_material.ms', buildMaxScriptFiles(usedTex.map(t => t.name)))
       addText('info.txt', [
-        'Mesh z Google Photorealistic 3D Tiles — REFERENCE (jen geometrie, bez textur).',
+        'Mesh z Google Photorealistic 3D Tiles — REFERENCE (geometrie + zapečené fototextury).',
         'Souřadnice: reálné S-JTSK (EPSG:5514, proj4), výšky Bpv → lícuje s exportem terénu i modely.',
         'Ořezáno na hranici vybraných parcel. Kvalita = fotogrammetrická „tavenina" (jen jako reference výšek a tvarů).',
         'POZOR: licence Google zakazuje odvozené modely — pouze pro interní referenci při modelování.',
-        `Trojúhelníků: ${triKept}, vrcholů: ${vCount}`,
+        '',
+        'Obsah zipu:',
+        '  google_mesh.obj  — mesh (Y = sever, Z = výška), materiál na každou dlaždici',
+        '  google_mesh.mtl  — materiály; Max si textury natáhne sám při importu OBJ',
+        '  google_tex_*.jpg — textury dlaždic, syrové z Googlu (bez překódování)',
+        usedTex.length ? '  vray_material.ms — po importu spusť (Scripting > Run Script) pro převod na VRayMtl' : '',
+        '',
+        `Trojúhelníků: ${triKept}, vrcholů: ${vCount}, textur: ${usedTex.length} (${texMB.toFixed(1)} MB)`,
         `Vygenerováno: ${new Date().toLocaleString('cs-CZ')}`,
-      ].join('\n'))
+      ].filter(Boolean).join('\n'))
       zip.end(); check()
       download(concatBytes(chunks), `google_mesh_sjtsk_${Math.round((minX + maxX) / 2)}_${Math.round((minY + maxY) / 2)}.zip`, 'application/zip')
-      toast.success(`Vyveden Google mesh (${triKept} trojúhelníků)`)
+      toast.success(`Vyveden Google mesh (${triKept} trojúhelníků, ${usedTex.length} textur)`)
     } catch (e) {
       if (isAbortError(e)) { toast.info('Export zrušen'); return }
       console.error('Export Google meshe selhal:', e)
@@ -3204,7 +2483,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const dwgColor = (rgb: number) => Cesium.Color.fromBytes((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255)
 
   // nastaví viditelnost všech Cesium primitivů jedné hladiny (čáry + popisky + body)
-  const setLayerShow = (ly: DrawLayer, show: boolean) => { if (ly.prim) ly.prim.show = show; if (ly.labels) ly.labels.show = show; if (ly.points) ly.points.show = show }
+  const setLayerShow = (ly: DrawLayer, show: boolean) => { if (ly.prim) ly.prim.show = show; for (const lp of ly.labels) lp.show = show; if (ly.points) ly.points.show = show }
 
   function removeDrawing(id: string) {
     const v = viewerRef.current
@@ -3212,7 +2491,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     if (d && v && !v.isDestroyed()) {
       for (const ly of d.layers) {
         if (ly.prim) v.scene.primitives.remove(ly.prim)
-        if (ly.labels) v.scene.primitives.remove(ly.labels)
+        for (const lp of ly.labels) v.scene.primitives.remove(lp)
         if (ly.points) v.scene.primitives.remove(ly.points)
       }
     }
@@ -3261,9 +2540,22 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
 
     // svislý směr ve středu (pro posun výšky) + sběr odkazů na prvky (pro živou průhlednost)
     const up = Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(Cesium.Cartesian3.fromDegrees(clon, clat, h0), new Cesium.Cartesian3())
-    const labelRefs: DrawingEntry['labelRefs'] = []
+    const textMats: DrawingEntry['textMats'] = []
     const pointRefs: DrawingEntry['pointRefs'] = []
     const polyRefs: DrawingEntry['polyRefs'] = []
+
+    // Báze pro texty: kotva každého textu jde přes toLL (přesně jako čáry), ale rohy písmen se
+    // odsazují o metry v této sdílené ENU bázi — na vzdálenost pár km je odchylka směru < 0,05°.
+    const enuC = Cesium.Transforms.eastNorthUpToFixedFrame(Cesium.Cartesian3.fromDegrees(clon, clat, h0))
+    const east = Cesium.Matrix4.getColumn(enuC, 0, new Cesium.Cartesian4())
+    const north = Cesium.Matrix4.getColumn(enuC, 1, new Cesium.Cartesian4())
+    const eastC = new Cesium.Cartesian3(east.x, east.y, east.z)
+    const northC = new Cesium.Cartesian3(north.x, north.y, north.z)
+    const toXYZ = (x: number, y: number) => { const [lo, la] = toLL(x, y); return Cesium.Cartesian3.fromDegrees(lo, la, h0) }
+    // Konvergence poledníků: osa +X výkresu v S-JTSK NENÍ východ (Křovák je šikmá kuželová
+    // projekce), takže bez téhle korekce by byly všechny texty stočené o několik stupňů.
+    const dv = Cesium.Cartesian3.subtract(toXYZ(cx + 1, cy), toXYZ(cx, cy), new Cesium.Cartesian3())
+    const conv = Math.atan2(Cesium.Cartesian3.dot(dv, northC), Cesium.Cartesian3.dot(dv, eastC))
 
     let wlon = Infinity, elon = -Infinity, slat = Infinity, nlat = -Infinity
     const seen = (lon: number, lat: number) => { if (lon < wlon) wlon = lon; if (lon > elon) elon = lon; if (lat < slat) slat = lat; if (lat > nlat) nlat = lat }
@@ -3273,10 +2565,8 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     for (const p of parse.prims) { const arr = byLayer.get(p.layer); if (arr) arr.push(p); else byLayer.set(p.layer, [p]) }
 
     const layers: DrawLayer[] = []
-    // velké výkresy mají desetitisíce textů → vysoký strop + vzdálenostní LOD (popisky se schovají
-    // až při extrémním oddálení, ať to nesestřelí výkon). Rozsah odhadneme z velikosti výkresu.
-    const drawSpanM = Math.max(parse.maxX - parse.minX, parse.maxY - parse.minY) || 2000
-    const labelFar = Math.min(200000, Math.max(8000, drawSpanM * 3))
+    // Velké výkresy mají desetitisíce textů → strop na počet. Vzdálenostní LOD už není potřeba:
+    // texty jsou teď v metrech, takže se při oddálení samy zmenší do neviditelna.
     let labelBudget = 30000
     for (const [lname, lprims] of byLayer) {
       const instances: Cesium.GeometryInstance[] = []
@@ -3305,18 +2595,19 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         : null
       if (prim) for (const m of polyMeta) polyRefs.push({ prim, id: m.id, c: m.c })
 
-      let labels: Cesium.LabelCollection | null = null
+      // Texty jako geometrie v rovině výkresu (ne Labely) → drží rotaci i výšku v metrech z DXF.
+      const labels: Cesium.Primitive[] = []
       const texts = lprims.filter((p): p is Extract<DrawPrim, { kind: 'text' }> => p.kind === 'text')
       if (texts.length && labelBudget > 0) {
-        labels = new Cesium.LabelCollection()
-        for (const t of texts) {
-          if (labelBudget-- <= 0) break
-          const [lon, lat] = toLL(t.pt[0], t.pt[1]); seen(lon, lat)
-          const fc = dwgColor(t.color)
-          const lab = labels.add({ position: Cesium.Cartesian3.fromDegrees(lon, lat, h0), text: t.text, font: '13px sans-serif', fillColor: fc, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY, scale: 0.85, distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, labelFar) })
-          labelRefs.push({ l: lab, f: fc, o: Cesium.Color.BLACK })
-        }
-        v.scene.primitives.add(labels)
+        const take = texts.slice(0, Math.max(0, labelBudget))
+        labelBudget -= take.length
+        for (const t of take) { const [lon, lat] = toLL(t.pt[0], t.pt[1]); seen(lon, lat) }
+        const built = buildTextPrims({
+          texts: take, anchor: toXYZ, east: eastC, north: northC, up, conv,
+          colorCss: rgb => `#${(rgb & 0xffffff).toString(16).padStart(6, '0')}`,
+        })
+        for (const tp of built.prims) { v.scene.primitives.add(tp); labels.push(tp) }
+        textMats.push(...built.mats)
       }
 
       let points: Cesium.PointPrimitiveCollection | null = null
@@ -3327,14 +2618,14 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         v.scene.primitives.add(points)
       }
 
-      if (prim || labels || points) layers.push({ name: lname || '0', color: lprims[0].color, visible: true, prim, labels, points })
+      if (prim || labels.length || points) layers.push({ name: lname || '0', color: lprims[0].color, visible: true, prim, labels, points })
     }
     layers.sort((a, b) => a.name.localeCompare(b.name, 'cs'))
 
     const id = `${Date.now()}`
     const pad = 0.0004
     const bounds = (elon > wlon && nlat > slat) ? Cesium.Rectangle.fromDegrees(wlon - pad, slat - pad, elon + pad, nlat + pad) : null
-    drawingsRef.current.set(id, { layers, bounds, up, labelRefs, pointRefs, polyRefs })
+    drawingsRef.current.set(id, { layers, bounds, up, textMats, pointRefs, polyRefs })
     upsertObj({ id: `drawing-${id}`, kind: 'drawing', name: `Výkres ${name}`, visible: true })
     console.log(`Výkres „${name}": ${parse.prims.length} prvků, umístění ${mode}`)
     if (bounds) v.camera.flyTo({ destination: bounds, duration: 1.2 })
@@ -3345,12 +2636,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     const m = Cesium.Matrix4.fromTranslation(Cesium.Cartesian3.multiplyByScalar(e.up, off, new Cesium.Cartesian3()))
     for (const ly of e.layers) {
       if (ly.prim) ly.prim.modelMatrix = m
-      if (ly.labels) ly.labels.modelMatrix = m
+      for (const lp of ly.labels) lp.modelMatrix = m
       if (ly.points) ly.points.modelMatrix = m
     }
   }
   function applyDrawAlpha(e: DrawingEntry, a: number) {
-    for (const r of e.labelRefs) { r.l.fillColor = r.f.withAlpha(a); r.l.outlineColor = r.o.withAlpha(a) }
+    for (const mt of e.textMats) mt.uniforms.opacity = a
     for (const r of e.pointRefs) r.p.color = r.c.withAlpha(a)
     for (const r of e.polyRefs) { const at = r.prim.getGeometryInstanceAttributes(r.id); if (at) at.color = Cesium.ColorGeometryInstanceAttribute.toValue(r.c.withAlpha(a), at.color) }
     viewerRef.current?.scene.requestRender()
@@ -3370,6 +2661,452 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       duration: 0.5,
       complete: () => { if (!v.isDestroyed()) v.scene.camera.switchToOrthographicFrustum() },
     })
+  }
+
+  useEffect(() => {
+    shakeRef.current = { on: shakeOn && presentOn, amt: shakeAmt } // mimo prezentaci se nechvěje
+    // ukládá se JEN intenzita (výchozí pro slider); zapnutí patří uloženému pohledu, ne prohlížeči
+    try { localStorage.setItem(SHAKE_KEY, JSON.stringify({ amt: shakeAmt })) } catch { /* */ }
+  }, [shakeOn, shakeAmt, presentOn])
+
+  /**
+   * „Kamera z ruky": jemné rozechvění pohledu v prezentaci.
+   *
+   * Nasazuje se PŘED vykreslením snímku a hned po něm se kamera vrátí přesně tam, kde byla.
+   * Skutečný stav kamery tak zůstává čistý — přelety (flyTo i orbit), ovládání myší, ukládání
+   * pohledů a `viewCenterGround` pracují s nerozechvěnou kamerou a chvění se nikam nenasčítá.
+   * (Kdyby se chvění do kamery zapisovalo natrvalo, po minutě prezentace by ujela jinam.)
+   *
+   * Otáčí se jen POHLED (yaw/pitch/roll kolem vlastních os kamery), pozicí nehýbeme: je to to,
+   * co na „z ruky" čte, kamera se nemůže dostat do terénu a nevzniká gimbal u pohledu shora.
+   * Rotace jdou přes `look*`/`twist*`, takže se nepřevádí na heading/pitch/roll a zpět —
+   * obnova je pak bitově přesná a nedrift.
+   *
+   * Šum = součet nesouměřitelných sinusovek (žádná knihovna): pomalé plutí + rychlejší
+   * mikrochvění, každá osa s jiným rozfázováním, aby se vzor dlouho neopakoval. Amplituda
+   * se škáluje zorným úhlem — u úzkého FOV je stejný úhel na obraze větší, takže by přizoomovaný
+   * záběr jinak vibroval mnohem víc.
+   *
+   * POZOR na okno mezi `onPre` a `onPost`: uvnitř něj je kamera rozechvělá a JEN TAM se smí
+   * promítat kotvy do obrazovky. `CalloutLayer` (callouts.tsx) proto počítá pozice popisků
+   * v `preRender` — kdyby to dělal v `postRender`, dostal by už narovnanou kameru a popisky by
+   * po scéně klouzaly o celou výchylku. Nepřehazovat ani jednu z těch registrací.
+   */
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    // Scénu i obě události si držíme z doby registrace. V odhlašování se na `v.scene` sahat NESMÍ:
+    // cleanup běží při zrušení komponenty, tedy až po zničení viewru (init efekt je deklarovaný
+    // dřív, takže jeho cleanup jde první), a getter `Viewer.scene` pak sáhne do už zahozeného
+    // widgetu a spadne. `Viewer.isDestroyed()` to nezachytí — v Cesiu vrací vždy false.
+    const scene = v.scene
+    const cam = scene.camera
+    const C3 = Cesium.Cartesian3
+    let saved: { pos: Cesium.Cartesian3; dir: Cesium.Cartesian3; up: Cesium.Cartesian3 } | null = null
+    const t0 = performance.now()
+    const wave = (t: number, parts: [number, number][]) =>
+      parts.reduce((s, [hz, amp]) => s + Math.sin(t * hz * Math.PI * 2) * amp, 0)
+
+    const onPre = () => {
+      const { on, amt } = shakeRef.current
+      if (!on || amt <= 0) return
+      // Snímkování 4 pohledů si kameru drží přes camera.lookAt (nenulový transform) a chce čisté
+      // záběry — tam do ní nesaháme.
+      if (!Cesium.Matrix4.equals(cam.transform, Cesium.Matrix4.IDENTITY)) return
+      const t = (performance.now() - t0) / 1000
+      const fov = (cam.frustum as Cesium.PerspectiveFrustum).fov // ortho frustum ho nemá → bez škálování
+      const k = Cesium.Math.toRadians(SHAKE_MAX_DEG) * amt * (fov ? fov / Cesium.Math.toRadians(60) : 1)
+      saved = {
+        pos: C3.clone(cam.positionWC, new C3()),
+        dir: C3.clone(cam.directionWC, new C3()),
+        up: C3.clone(cam.upWC, new C3()),
+      }
+      cam.lookRight(wave(t, [[0.077, 0.62], [0.26, 0.26], [0.77, 0.12]]) * k)
+      cam.lookUp(wave(t + 3.7, [[0.063, 0.58], [0.29, 0.28], [0.91, 0.14]]) * k)
+      cam.twistRight(wave(t + 11.3, [[0.049, 0.50], [0.203, 0.22]]) * k * 0.5) // klopení jen poloviční
+    }
+    const onPost = () => {
+      if (!saved) return
+      cam.setView({ destination: saved.pos, orientation: { direction: saved.dir, up: saved.up } })
+      saved = null
+    }
+    scene.preRender.addEventListener(onPre)
+    scene.postRender.addEventListener(onPost)
+    // Odhlášení stačí odebrat posluchače (jen splice v poli, bezpečné i po zničení scény).
+    // Kameru tu nesrovnáváme zpátky — cleanup přichází jen se zánikem komponenty, kdy už
+    // viewer stejně mizí, a `cam.setView` na zničené scéně by spadl.
+    return () => {
+      scene.preRender.removeEventListener(onPre)
+      scene.postRender.removeEventListener(onPost)
+    }
+  }, [])
+
+  /**
+   * Plynulé přiblížení kolečkem.
+   *
+   * Cesium na každý zářez kolečka kameru posune skokem — při rychlejším rolování to nadskakuje.
+   * Kolečko si proto bereme sami (WHEEL jsme mu odebrali při inicializaci): každý zářez se
+   * přičte do „nedojetého“ zoomu a ten k nule dotáhne kriticky tlumená pružina, takže se pohyb
+   * plynule rozjede i doklouže — bez kopnutí na začátku a bez přestřelení na konci.
+   *
+   * Krok je NÁSOBNÝ vůči výšce nad terénem — u země jemný, z výšky velký. Výška nad elipsoidem
+   * by u kopců lhala (terén v Liberci je ~400 m), proto se výška terénu odečítá.
+   *
+   * Běží v `preUpdate`, tedy mimo okno mezi pre/postRender, kde sedí chvění kamery — jinak by
+   * si obojí přepisovalo pozici. Sražení s terénem řeší ovladač až v dalším cyklu, takže si krok
+   * omezujeme sami; bez toho kamera na jeden snímek propadne pod zem, než ji vytlačí zpátky.
+   */
+  const zoomRef = useRef(0) // nedojetý zoom v log jednotkách (+ = přiblížit)
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    const scene = v.scene, cam = scene.camera, canvas = scene.canvas
+    const ssc = scene.screenSpaceCameraController
+
+    const onWheel = (e: WheelEvent) => {
+      if (!ssc.enableInputs) return // režimy, které si vstupy berou (posun modelu, malování dlaždic)
+      e.preventDefault()
+      const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1) // řádky/stránky → pixely
+      zoomRef.current = Cesium.Math.clamp(zoomRef.current - px * ZOOM_SENS, -ZOOM_MAX, ZOOM_MAX)
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+
+    let last = performance.now()
+    let zoomVel = 0 // rychlost pružiny (log jednotek/s) — musí přežít mezi snímky, jinak nemá setrvačnost
+    const onPreUpdate = () => {
+      const now = performance.now()
+      const dt = Math.min(0.1, (now - last) / 1000) // po přepnutí tabu ať to neskočí naráz
+      last = now
+      const rest = zoomRef.current
+      if (Math.abs(rest) < 1e-4 && Math.abs(zoomVel) < 1e-4) { zoomRef.current = 0; zoomVel = 0; return }
+      // Kriticky tlumená pružina táhne zbytek k nule. Prostý exponenciální doběh by na každý
+      // zářez skočil z nuly rovnou na plnou rychlost — a právě to kopnutí je zbytkové cukání.
+      // Pružina má rychlost spojitou, takže se pohyb rozjede i doklouže. Kriticky tlumená =
+      // nejrychlejší možný náběh BEZ přestřelení, jinak by zoom na konci gumoval.
+      // Tvar je semi-implicitní (jmenovatel), aby to bylo stabilní i při vynechaném snímku.
+      const w = 2 / ZOOM_TAU
+      zoomVel = (zoomVel - dt * w * w * rest) / (1 + 2 * w * dt + w * w * dt * dt)
+      let step = -zoomVel * dt
+      const cc = cam.positionCartographic
+      const h = Math.max(3, cc.height - (scene.globe.getHeight(cc) ?? 0))
+      zoomRef.current = rest - step
+      if (step > 0) { // přibližování zastav nad zemí, oddalování omezovat netřeba
+        const maxStep = Math.log(h / Math.max(1.5, ssc.minimumZoomDistance))
+        if (step > maxStep) { step = Math.max(0, maxStep); zoomRef.current = 0; zoomVel = 0 } // u země zastav i pružinu
+      }
+      if (step !== 0) cam.zoomIn(h * (1 - Math.exp(-step))) // step < 0 → negativní posun = oddálení
+    }
+    scene.preUpdate.addEventListener(onPreUpdate)
+    return () => {
+      canvas.removeEventListener('wheel', onWheel)
+      scene.preUpdate.removeEventListener(onPreUpdate)
+    }
+  }, [])
+
+  // ── uložené pohledy kamery (přežijí refresh) ──
+  function persistCamViews(vs: CamView[]) { setCamViews(vs); try { localStorage.setItem('geo.camviews', JSON.stringify(vs)) } catch { /* */ } }
+  const currentLook = (): CamLook => ({ fov, bloom: bloomOn, dofOn, dofMode, dofFocal, dofBlur, dofRadius, dofFeather, shakeOn, shakeAmt })
+  /**
+   * Přejede vzhled na cílový během přeletu — stejně dlouho a stejnou easeInOut jako pohyb kamery,
+   * takže obojí dosedne naráz.
+   *
+   * Nespojité věci se interpolovat nedají, každá se řeší jinak:
+   *  - `dofMode` (kruh × vzdálenost) se rozhodne hned na začátku — mezi poloměrem kruhu a ohniskovou
+   *    vzdáleností není co prolínat. Animují se pak už jen parametry cílového režimu.
+   *  - `dofOn` se nepřepíná skokem: rozostření zůstane celou dobu zapnuté a přejíždí se jeho SÍLA
+   *    z/na nulu, takže zapnutí i vypnutí vyblednou místo cvaknutí (stepSize 0 = žádné rozmazání).
+   *  - `bloom` je jen přepínač, sepne se na konci.
+   *  - `shakeOn`/`shakeAmt` jedou přes intenzitu jako rozostření (viz níž) — chvění patří k pohledu,
+   *    takže se mezi záběry musí umět jak nasadit, tak utichnout.
+   *
+   * Stav Reactu se přepisuje AŽ na konci — nastavovat ho každý snímek by 3 s překreslovalo celou
+   * komponentu. Slidery se proto rozhýbou až po doletu.
+   */
+  function animateCamLook(target: CamLook, dur = 3000) {
+    // Při vypnuté prezentaci se efekty nezapínají — přílet na pohled by je jinak vrátil zpátky
+    // a vypínač by nic neznamenal. Cílové hodnoty se ale schovají, takže zapnutí prezentace
+    // navazuje na pohled, na kterém zrovna stojíš.
+    let to = target
+    if (!presentOn) {
+      presentSnapRef.current = { dofOn: target.dofOn, bloom: target.bloom }
+      to = { ...target, dofOn: false, bloom: false }
+    }
+    const from = currentLook()
+    const token = ++lookAnimRef.current
+    const mode = to.dofMode
+    const anyDof = from.dofOn || to.dofOn
+    const blurFrom = from.dofOn ? from.dofBlur : 0
+    const blurTo = to.dofOn ? to.dofBlur : 0
+    // Chvění se taky nepřepíná skokem: jede se přes jeho INTENZITU z/na nulu (stejný trik jako
+    // u rozostření), takže se kamera rozechvěje i uklidní plynule místo cvaknutí. Chybějící
+    // hodnoty (starší pohledy) znamenají vypnuto → přílet na takový pohled chvění zase utiší.
+    const shakeFrom = from.shakeOn ? (from.shakeAmt ?? 0) : 0
+    const shakeTo = to.shakeOn ? (to.shakeAmt ?? 0) : 0
+    const anyShake = shakeFrom > 0 || shakeTo > 0
+    const t0 = performance.now()
+    const step = () => {
+      const v = viewerRef.current
+      if (!v || v.isDestroyed() || lookAnimRef.current !== token) return
+      let t = (performance.now() - t0) / dur; if (t > 1) t = 1
+      const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2   // stejná easeInOut jako orbit
+      const mix = (a: number, b: number) => a + (b - a) * e
+      applyFovRaw(mix(from.fov, to.fov))
+      applyDofRaw({
+        on: anyDof, mode,
+        focal: mix(from.dofFocal, to.dofFocal), blur: mix(blurFrom, blurTo),
+        radius: mix(from.dofRadius, to.dofRadius), feather: mix(from.dofFeather, to.dofFeather),
+      })
+      if (anyShake) shakeRef.current = { on: presentOn, amt: mix(shakeFrom, shakeTo) }
+      if (t < 1) { requestAnimationFrame(step); return }
+      // dosedni přesně na cíl a srovnej s ním stav ovládání
+      setFov(to.fov); setBloomOn(to.bloom); applyBloom(to.bloom)
+      setDofOn(to.dofOn); setDofMode(to.dofMode); setDofFocal(to.dofFocal); setDofBlur(to.dofBlur)
+      setDofRadius(to.dofRadius); setDofFeather(to.dofFeather)
+      applyDofRaw({ on: to.dofOn, mode: to.dofMode, focal: to.dofFocal, blur: to.dofBlur, radius: to.dofRadius, feather: to.dofFeather })
+      // amt si při vypnutém chvění nechá poslední hodnotu, ať slider nespadne na nulu
+      setShakeOn(to.shakeOn ?? false); setShakeAmt(to.shakeAmt ?? shakeAmt)
+    }
+    requestAnimationFrame(step)
+  }
+  function saveCamView() {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const c = v.camera, pos = c.positionWC
+    persistCamViews([...camViews, { id: `v${Date.now()}`, name: camName.trim() || `Pohled ${camViews.length + 1}`, dest: [pos.x, pos.y, pos.z], h: c.heading, p: c.pitch, r: c.roll, look: currentLook() }])
+    setCamName('')
+  }
+  /** přepíše kameru i vzhled uloženého pohledu aktuálním stavem (pohled zůstane na svém místě v seznamu) */
+  function updateCamView(i: number) {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const c = v.camera, pos = c.positionWC
+    persistCamViews(camViews.map((cv, j) => j === i ? { ...cv, dest: [pos.x, pos.y, pos.z], h: c.heading, p: c.pitch, r: c.roll, look: currentLook() } : cv))
+  }
+  function gotoCamView(cv: CamView) {
+    setActiveViewId(cv.id)               // řídí, které popisky jsou vysunuté
+    pulseLayerRef.current?.trigger(new Set(presentOn ? pulses.filter(p => p.views.includes(cv.id)).map(p => p.id) : []))
+    if (cv.look) animateCamLook(cv.look) // starší pohledy `look` nemají → nastavení se nechá být
+    if (orbitOn) orbitToCamView(cv); else gotoCamViewDirect(cv)
+  }
+  function gotoCamViewDirect(cv: CamView) {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    orbitAnimRef.current++ // zruš případný běžící orbit
+    v.camera.flyTo({ destination: new Cesium.Cartesian3(cv.dest[0], cv.dest[1], cv.dest[2]), orientation: { heading: cv.h, pitch: cv.p, roll: cv.r }, duration: 3 })
+  }
+  // Přelet OBLOUKEM: kamera obíhá po nejkratším oblouku kolem STŘEDU aktuálního pohledu a přitom se
+  // pořád dívá na ten střed → objekt uprostřed zůstane uprostřed. Konec = pozice uloženého pohledu.
+  function orbitToCamView(cv: CamView) {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const C3 = Cesium.Cartesian3, M3 = Cesium.Matrix3
+    const g = viewCenterGround(v)
+    const P = C3.fromDegrees(g.lon, g.lat, g.height)               // pivot = na co koukám
+    const startPos = C3.clone(v.camera.positionWC, new C3())
+    const endPos = new C3(cv.dest[0], cv.dest[1], cv.dest[2])
+    const oS = C3.subtract(startPos, P, new C3()), oE = C3.subtract(endPos, P, new C3())
+    const magS = C3.magnitude(oS), magE = C3.magnitude(oE)
+    if (magS < 1 || magE < 1) { gotoCamViewDirect(cv); return }     // degenerace → přímý let
+
+    // Kam se ULOŽENÝ pohled dívá (v ECEF). Počítá se stejně, jako to dělá Cesium v Camera.setView3D:
+    // heading posunutý o -90°, ze vzniklé rotační matice je směr sloupec 0 — a to celé v ENU rámci
+    // cílové pozice. (Přes pickPosition to nešlo: čte depth buffer minulého snímku, tedy staré kamery.)
+    const hpr = new Cesium.HeadingPitchRoll(cv.h - Cesium.Math.PI_OVER_TWO, cv.p, cv.r)
+    const rotM = M3.fromQuaternion(Cesium.Quaternion.fromHeadingPitchRoll(hpr, new Cesium.Quaternion()), new M3())
+    const enuEnd = Cesium.Matrix4.getMatrix3(Cesium.Transforms.eastNorthUpToFixedFrame(endPos), new M3())
+    const endDir = C3.normalize(M3.multiplyByVector(enuEnd, M3.getColumn(rotM, 0, new C3()), new C3()), new C3())
+
+    // Oblouk dává smysl JEN když se oba pohledy dívají zhruba na totéž — obíhá se přece kolem
+    // společného předmětu. Když jsem si mezitím odletěl jinam po mapě, pivot s uloženým pohledem
+    // nesouvisí a orbit kolem něj by skončil úplně jinde. Změř, jak daleko paprsek uloženého
+    // pohledu míjí pivot; když moc, leť napřímo.
+    const toP = C3.subtract(P, endPos, new C3())
+    const along = C3.dot(toP, endDir)
+    const miss = C3.magnitude(C3.subtract(toP, C3.multiplyByScalar(endDir, along, new C3()), new C3()))
+    if (along <= 0 || miss > 0.35 * magE) { gotoCamViewDirect(cv); return }
+
+    // orbit ve sférických souřadnicích ENU rámce pivotu: zvlášť AZIMUT (otáčení do strany) a NÁKLON
+    // (elevace) + vzdálenost → kamera obíhá kolem BOKU, ne přes vršek (zenit).
+    const enuR = Cesium.Matrix4.getMatrix3(Cesium.Transforms.eastNorthUpToFixedFrame(P), new M3())
+    const enuRT = M3.transpose(enuR, new M3())
+    const toLocal = (o: Cesium.Cartesian3) => M3.multiplyByVector(enuRT, C3.normalize(o, new C3()), new C3()) // ECEF→ENU
+    const lS = toLocal(oS), lE = toLocal(oE)
+    const azS = Math.atan2(lS.x, lS.y), azE = Math.atan2(lE.x, lE.y)                 // heading od severu
+    const elS = Math.asin(Cesium.Math.clamp(lS.z, -1, 1)), elE = Math.asin(Cesium.Math.clamp(lE.z, -1, 1))
+    let dAz = azE - azS; while (dAz > Math.PI) dAz -= 2 * Math.PI; while (dAz < -Math.PI) dAz += 2 * Math.PI // nejkratší
+
+    // Orientace se interpoluje v heading/pitch/roll od SOUČASNÉ k uložené, a to stejnou easeInOut
+    // jako pozice — tím jde otáčení i posun jedním gestem.
+    //
+    // Dřív se orientace držela „koukej na pivot" a na uloženou sjížděla až v posledních 45 %. To
+    // dělalo trhnutí: pozice se kvůli easeInOut na konci téměř zastaví, takže se kamera dotáčela
+    // (klidně o 19°) prakticky na místě. Interpolace headingu navíc změnu azimutu oblouku sama
+    // kopíruje, takže když oba pohledy míří na týž předmět, zůstane uprostřed i bez dohánění.
+    const hS = v.camera.heading, pS = v.camera.pitch, rS = v.camera.roll
+    const shortest = (a: number) => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a }
+    // Heading musí točit na TUTÉŽ stranu, kam obíhá pozice. Dřív se obojí rozhodovalo zvlášť
+    // („nejkratší cesta“ pro azimut oblouku a nezávisle na tom pro heading) a u protilehlých
+    // pohledů, kde je rozdíl kolem 180°, si to sem tam zvolilo opačná znaménka — kamera pak
+    // obíhala doleva a otáčela se doprava, tedy se cestou přestala dívat na předmět a dotočila
+    // se až na konci. Základ je proto swing oblouku a k němu jen nejkratší ZBYTEK, aby se
+    // pořád dosedlo přesně na uložený heading.
+    const dH = dAz + shortest(cv.h - hS - dAz), dP = cv.p - pS, dR = shortest(cv.r - rS)
+
+    const token = ++orbitAnimRef.current
+    const dur = 3000, t0 = performance.now(), tmp = new C3()
+    const step = () => {
+      if (v.isDestroyed() || orbitAnimRef.current !== token) return
+      let t = (performance.now() - t0) / dur; if (t > 1) t = 1
+      if (t >= 1) {
+        // Dosedni PŘESNĚ na uložený pohled, ne na dopočítanou orientaci — jinak kamera skončí na
+        // správné pozici, ale natočená na starý pivot, což vypadá, jako by doletěla někam jinam.
+        v.camera.setView({ destination: endPos, orientation: { heading: cv.h, pitch: cv.p, roll: cv.r } })
+        return
+      }
+      const te = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2   // easeInOut
+      const az = azS + dAz * te, el = elS + (elE - elS) * te, rng = magS + (magE - magS) * te
+      const ch = Math.cos(el)
+      const arc = M3.multiplyByVector(enuR, new C3(Math.sin(az) * ch, Math.cos(az) * ch, Math.sin(el)), new C3()) // ENU→ECEF
+      const pos = C3.add(P, C3.multiplyByScalar(arc, rng, tmp), new C3())
+      v.camera.setView({ destination: pos, orientation: { heading: hS + dH * te, pitch: pS + dP * te, roll: rS + dR * te } })
+      requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+  }
+  function delCamView(i: number) {
+    const gone = camViews[i]?.id
+    persistCamViews(camViews.filter((_, j) => j !== i))
+    if (gone) {
+      persistCallouts(callouts.map(c => c.views.includes(gone) ? { ...c, views: c.views.filter(x => x !== gone) } : c))
+      persistPulses(pulses.map(p => p.views.includes(gone) ? { ...p, views: p.views.filter(x => x !== gone) } : p))
+      if (activeViewId === gone) setActiveViewId(null)
+    }
+  }
+
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!viewerReady || !v || v.isDestroyed()) return
+    const layer = new PulseLayer(v)
+    pulseLayerRef.current = layer
+    layer.sync(pulses)
+    return () => { layer.destroy(); pulseLayerRef.current = null }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerReady])
+  useEffect(() => { pulseLayerRef.current?.sync(pulses) }, [pulses])
+
+  // ── pulzující zvýraznění parcel ──
+  function persistPulses(ps: PulseSet[]) { setPulses(ps); try { localStorage.setItem('geo.pulses', JSON.stringify(ps)) } catch { /* */ } }
+  /** Okopíruje prstence PRÁVĚ vybraných parcel do nové sady — od té chvíle je na výběru nezávislá. */
+  function addPulseFromSelection() {
+    const rings = [...parcelsRef.current.values()]
+      .map(p => p.ring.map(([lo, la]) => [lo, la] as [number, number]))
+      .filter(r => r.length >= 3)
+    if (!rings.length) { toast.error('Nejdřív vyber parcely'); return }
+    const set: PulseSet = { id: `pl${Date.now()}`, name: `${rings.length}× parcela`, rings, color: pulseColor, count: pulseCount, views: activeViewId ? [activeViewId] : [] }
+    persistPulses([...pulses, set])
+    if (!activeViewId) toast.info('Sada vznikla, ale není vybraný pohled — nemá se kde spustit')
+  }
+  function delPulse(id: string) { persistPulses(pulses.filter(p => p.id !== id)) }
+  /** úprava už vytvořené sady — barva se přebarví za běhu, geometrie se nepřestavuje */
+  function updatePulse(id: string, patch: Partial<PulseSet>) { persistPulses(pulses.map(p => p.id === id ? { ...p, ...patch } : p)) }
+  function togglePulseHere(id: string, on: boolean) {
+    if (!activeViewId) return
+    persistPulses(pulses.map(p => p.id !== id ? p
+      : { ...p, views: on ? [...new Set([...p.views, activeViewId])] : p.views.filter(x => x !== activeViewId) }))
+  }
+  function playPulse(id: string) { pulseLayerRef.current?.trigger(new Set([id])) }
+  /**
+   * Hlavní vypínač prezentace: popisky, pulz a obrazové efekty (rozostření, bloom) naráz.
+   * Vypnutí si pamatuje, co bylo zapnuté, takže zapnutí nevrací výchozí hodnoty, ale ty tvoje.
+   */
+  function togglePresent() {
+    const nv = !presentOn
+    setPresentOn(nv)
+    if (!nv) {
+      presentSnapRef.current = { dofOn, bloom: bloomOn }
+      setDofOn(false); applyDof({ on: false })
+      setBloomOn(false); applyBloom(false)
+    } else {
+      const snap = presentSnapRef.current
+      if (snap) {
+        setDofOn(snap.dofOn); applyDof({ on: snap.dofOn })
+        setBloomOn(snap.bloom); applyBloom(snap.bloom)
+      }
+    }
+    // Popisky si zajedou samy (řídí je visibleCallouts), pulz je ale primitiv — musí se říct hned.
+    pulseLayerRef.current?.trigger(new Set(nv && activeViewId ? pulses.filter(p => p.views.includes(activeViewId)).map(p => p.id) : []))
+  }
+
+  // ── prezentační popisky (tečka + čára + bublina), vázané na uložené pohledy ──
+  function saveCallouts(cs: Callout[]) { try { localStorage.setItem('geo.callouts', JSON.stringify(cs)) } catch { /* */ } }
+  function persistCallouts(cs: Callout[]) { setCallouts(cs); saveCallouts(cs) }
+  function updateCallout(id: string, patch: Partial<Callout>) {
+    if (patch.dot || patch.frame || patch.size) {
+      const { dot, frame, size } = { ...calloutStyleRef.current, ...patch }
+      calloutStyleRef.current = { dot, frame, size }
+    }
+    persistCallouts(callouts.map(c => c.id === id ? { ...c, ...patch } : c))
+  }
+  function delCallout(id: string) { persistCallouts(callouts.filter(c => c.id !== id)); if (calloutSel === id) setCalloutSel(null) }
+  /** zapne/vypne popisek v PRÁVĚ aktivním pohledu */
+  function toggleCalloutHere(id: string, on: boolean) {
+    if (!activeViewId) return
+    persistCallouts(callouts.map(c => c.id !== id ? c
+      : { ...c, views: on ? [...new Set([...c.views, activeViewId])] : c.views.filter(x => x !== activeViewId) }))
+  }
+
+  // ── DOF / FOV / bloom ──
+  type DofCfg = { on: boolean; mode: 'dist' | 'circle'; focal: number; blur: number; radius: number; feather: number }
+  /**
+   * Přepošle nastavení do post-process stages. Bere jen změněné hodnoty (`applyDof({ radius })`),
+   * zbytek se dočte ze současného stavu — setState je asynchronní, takže spoléhat na něj by
+   * znamenalo použít o krok starou hodnotu.
+   *
+   * Stage se zakládají líně a jen ta, která se opravdu používá: každá si drží vlastní framebuffery,
+   * takže vyrobit obě dopředu by stálo paměť i výkon zbytečně.
+   */
+  function applyDofRaw(c: DofCfg) {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const wantDist = c.on && c.mode === 'dist'
+    const wantCircle = c.on && c.mode === 'circle'
+
+    if (wantDist && !dofRef.current) dofRef.current = v.scene.postProcessStages.add(Cesium.PostProcessStageLibrary.createDepthOfFieldStage()) as Cesium.PostProcessStageComposite
+    if (dofRef.current) {
+      dofRef.current.enabled = wantDist
+      if (wantDist) {
+        const u = dofRef.current.uniforms as { focalDistance: number; stepSize: number; sigma: number }
+        u.focalDistance = c.focal; u.stepSize = c.blur; u.sigma = Math.max(1, c.blur)
+      }
+    }
+
+    if (wantCircle && !dofCircleRef.current) dofCircleRef.current = v.scene.postProcessStages.add(createCircleDofStage()) as Cesium.PostProcessStageComposite
+    if (dofCircleRef.current) {
+      dofCircleRef.current.enabled = wantCircle
+      if (wantCircle) {
+        const u = dofCircleRef.current.uniforms as CircleDofUniforms
+        u.radius = c.radius; u.feather = c.feather; u.stepSize = c.blur; u.sigma = Math.max(1, c.blur)
+      }
+    }
+    v.scene.requestRender()
+  }
+  function applyFovRaw(deg: number) {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const f = v.scene.camera.frustum
+    if (f instanceof Cesium.PerspectiveFrustum) f.fov = Cesium.Math.toRadians(deg)
+  }
+
+  // Veřejné obálky pro ovládání: ruční sáhnutí na slider ZRUŠÍ běžící přechod vzhledu, jinak by
+  // ho příští snímek animace hned přepsal. Animace proto sahá na *Raw, ovládání na tyhle.
+  function applyDof(o: Partial<DofCfg>) {
+    lookAnimRef.current++
+    applyDofRaw({ on: dofOn, mode: dofMode, focal: dofFocal, blur: dofBlur, radius: dofRadius, feather: dofFeather, ...o })
+  }
+  function applyFov(deg: number) { lookAnimRef.current++; applyFovRaw(deg) }
+  function dofFocusCenter() {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    const g = viewCenterGround(v)
+    const dist = Math.round(Cesium.Cartesian3.distance(v.camera.positionWC, Cesium.Cartesian3.fromDegrees(g.lon, g.lat, g.height)))
+    setDofFocal(dist); setDofOn(true); applyDof({ on: true, focal: dist })
+  }
+  function applyBloom(on: boolean) {
+    const v = viewerRef.current; if (!v || v.isDestroyed()) return
+    v.scene.postProcessStages.bloom.enabled = on
   }
 
   // odletí kamerou na daný objekt (výkres / model / parcela)
@@ -3545,7 +3282,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   function toggleVisible(o: SceneObj) {
     const vis = !o.visible
     if (o.kind === 'model') { const e = modelsRef.current.get(o.id); if (e) { e.model.show = vis; e.visible = vis } }
-    else if (o.kind === 'parcel') parcelsRef.current.get(o.id.replace('parcel-', ''))?.ents.forEach(en => { en.show = vis })
+    else if (o.kind === 'parcel') {
+      const pid = o.id.replace('parcel-', '')
+      const p = parcelsRef.current.get(pid)
+      if (p) { p.hidden = !vis; p.ents.forEach(en => { en.show = vis && parcelHl }) }
+      measureRef.current.get(pid)?.forEach(en => { en.show = vis })
+    }
     else if (o.kind === 'drawing') { const d = drawingsRef.current.get(o.id.replace('drawing-', '')); if (d) for (const ly of d.layers) setLayerShow(ly, vis && ly.visible) }
     setObjects(list => list.map(x => x.id === o.id ? { ...x, visible: vis } : x))
   }
@@ -3669,9 +3411,35 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }
   }
 
+  const activeView = camViews.find(cv => cv.id === activeViewId) ?? null
+  // vysunuté jsou jen popisky patřící aktivnímu pohledu; bez pohledu nesvítí nic
+  const visibleCallouts = new Set(presentOn && activeViewId ? callouts.filter(c => c.views.includes(activeViewId)).map(c => c.id) : [])
+
+  // Sjetí k sekci, která právě vznikla. Sleduje se jen „je / není", ne obsah — jinak by panel
+  // poskakoval při každé přidané parcele.
+  const hasParcels = parcelCount > 0
+  const hasTiles = tileCount > 0
+  const hasRegion = regionChoices.length > 0 || regionParts.length > 0 || !!regionName
+  const hasModelSel = !!placement
+  const hasDistrict = districtsOn && !!selectedDistrict
+  useEffect(() => { if (hasParcels) revealSection('parcely') }, [hasParcels])
+  useEffect(() => { if (hasTiles) revealSection('dlazdice') }, [hasTiles])
+  useEffect(() => { if (hasRegion) revealSection('uzemi') }, [hasRegion])
+  useEffect(() => { if (hasModelSel) revealSection('model') }, [hasModelSel])
+  useEffect(() => { if (hasDistrict) revealSection('mestcast') }, [hasDistrict])
+  useEffect(() => { if (splatOn) revealSection('splat') }, [splatOn])
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
+      <CalloutLayer
+        viewer={viewerReady ? viewerRef.current : null}
+        callouts={callouts}
+        visibleIds={visibleCallouts}
+        selectedId={calloutSel}
+        onPick={setCalloutSel}
+        onMove={(id, off) => updateCallout(id, { off })}
+      />
 
       <input
         ref={fileRef}
@@ -3707,200 +3475,921 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         </div>
       )}
 
-      {/* vyhledávání */}
-      <form onSubmit={runSearch} className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 p-1.5 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur">
-        <Search size={15} className="text-gray-500 ml-1.5" />
-        <input
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Najít místo (např. Liberec)…"
-          className="bg-transparent text-sm text-gray-100 placeholder-gray-500 outline-none w-56"
-        />
-        {searchErr && <span className="text-xs text-amber-400 mr-1">{searchErr}</span>}
-        <button type="submit" disabled={searching} className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm disabled:opacity-50">
-          {searching ? <Loader2 size={14} className="animate-spin" /> : 'Jdi'}
-        </button>
-      </form>
-
-      {/* ovládací panel */}
-      <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5 p-2 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur">
-        <button onClick={onBackToEditor} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm text-gray-200 hover:bg-gray-800 transition-colors">
-          <Box size={15} /> Editor
-        </button>
-        <div className="h-px bg-gray-700 my-0.5" />
-        <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1">Podklad</div>
-        <ToggleBtn active={base === 'ortofoto'} onClick={() => setBase('ortofoto')} icon={<Image size={15} />} label="Ortofoto ČR" />
-        <ToggleBtn active={base === 'zm'} onClick={() => setBase('zm')} icon={<MapIcon size={15} />} label={base === 'zm' ? `Topografická mapa (${ztmTier})` : 'Topografická mapa ČR'} />
-        {ENABLE_GOOGLE_3D && (
-          <ToggleBtn active={base === 'google'} onClick={() => setBase('google')} icon={googleLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="3D realita (Google)" />
-        )}
-        {ENABLE_GOOGLE_3D && base === 'google' ? (
-          <div className="flex flex-col gap-1 px-1 max-w-[190px]">
-            <div className="text-[10px] text-gray-500 leading-snug">
-              {googleErr ? <span className="text-amber-400">{googleErr}</span> : <>Fotorealistické 3D. Posuvníkem prosvítíš mapu pod ním.</>}
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-gray-400 w-9 shrink-0">3D</span>
-              <input type="range" min={0} max={1} step={0.05} value={googleAlpha} onChange={e => setGoogleAlpha(parseFloat(e.target.value))} className="flex-1 min-w-0 accent-cyan-500" title="Průhlednost 3D reality — vlevo jen mapa, vpravo plná 3D" />
-              <span className="text-[10px] text-gray-300 tabular-nums w-8">{Math.round(googleAlpha * 100)}%</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-400 w-9 shrink-0">Pod</span>
-              <button onClick={() => setGoogleUnder('ortofoto')} className={`px-1.5 py-0.5 rounded text-[11px] ${googleUnder === 'ortofoto' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>ortofoto</button>
-              <button onClick={() => setGoogleUnder('zm')} className={`px-1.5 py-0.5 rounded text-[11px] ${googleUnder === 'zm' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>topo</button>
-              <button onClick={() => setGoogleUnder('none')} title="Čistě 3D bez podkladu (skryje glóbus)" className={`px-1.5 py-0.5 rounded text-[11px] ${googleUnder === 'none' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>nic</button>
-            </div>
-            <div className="h-px bg-gray-700 my-0.5" />
-            <ToggleBtn active={katastrOn} onClick={() => setKatastrOn(v => !v)} icon={<Layers size={15} />} label="Katastr" />
-          </div>
-        ) : (
-          <>
-            <div className="h-px bg-gray-700 my-0.5" />
-            <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1">Překryv</div>
-            <ToggleBtn active={katastrOn} onClick={() => setKatastrOn(v => !v)} icon={<Layers size={15} />} label="Katastr" />
-          </>
-        )}
-        {ENABLE_OSM_BUILDINGS && (
-          <ToggleBtn active={osmOn} onClick={() => setOsmOn(v => !v)} icon={osmLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="Budovy (OSM)" />
-        )}
-        {ENABLE_LIBEREC_DISTRICTS && (
-          <ToggleBtn active={districtsOn} onClick={toggleDistricts} icon={districtsLoading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} label="Městské části Liberce" />
-        )}
-        <div className="h-px bg-gray-700 my-0.5" />
-        <ToggleBtn active={parcelMode} onClick={toggleParcel} icon={parcelLoading ? <Loader2 size={15} className="animate-spin" /> : <MapPin size={15} />} label={parcelMode ? 'Klikni na parcelu' : 'Vybrat parcelu'} />
-        <ToggleBtn active={areaMode} onClick={toggleAreaMode} icon={areaLoading ? <Loader2 size={15} className="animate-spin" /> : <Hexagon size={15} />} label={areaMode ? `Klikej body (${areaPtCount})` : 'Vybrat oblast'} />
-        {areaMode && areaPtCount >= 3 && (
-          <button onClick={finalizeArea} disabled={areaLoading} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-orange-600 hover:bg-orange-500 text-white transition-colors disabled:opacity-50">
-            <Check size={15} /> Vybrat parcely uvnitř
-          </button>
-        )}
-        <ToggleBtn active={tileMode} onClick={toggleTileMode} icon={<Grid3x3 size={15} />} label={tileMode ? `Klikej / táhni (${tileCount})` : 'Vybrat dlaždice'} />
-        <ToggleBtn active={regionMode} onClick={() => setRegionMode(m => !m)} icon={regionBusy ? <Loader2 size={15} className="animate-spin" /> : <Landmark size={15} />} label={regionMode ? 'Klikni na mapu (kraj/obec)' : 'Vybrat území'} />
-        {regionMode && (
-          <div className="flex flex-col gap-1 px-1 pb-0.5 max-w-[200px]">
-            <div className="text-[10px] text-gray-500 leading-snug">Klikni na mapu, nebo napiš název:</div>
-            <form onSubmit={searchRegion} className="flex items-center gap-1">
-              <input value={regionQuery} onChange={e => setRegionQuery(e.target.value)} placeholder="obec / kraj…" className="flex-1 min-w-0 bg-gray-800 rounded px-2 py-1 text-xs text-gray-100 outline-none placeholder:text-gray-600" />
-              <button type="submit" title="Vyhledat" className="shrink-0 p-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700">{regionBusy ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}</button>
-            </form>
-          </div>
-        )}
-        {tileMode && (
-          <div className="flex flex-col gap-1 px-1 pb-0.5">
-            <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
-              Tažením maluješ přes víc dlaždic; tah, co začne na vybrané, naopak odebírá.
-              <span className="text-gray-400"> Mapu tady posouváš pravým tlačítkem, zoom kolečkem.</span>
-            </div>
-            <button
-              onClick={() => setGridOn(g => !g)}
-              className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${gridOn ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
-            >
-              {gridOn ? <Eye size={13} /> : <EyeOff size={13} />} Mřížka s názvy
+      {/* Levý panel — jediné místo pro ovládání. Dřív se panely otevíraly jeden přes druhý,
+          takže se překrývaly; teď je vše v jednom sloupci ve sbalitelných sekcích. */}
+      {!panelOpen && (
+        <button
+          onClick={() => setPanelOpen(true)}
+          title="Zobrazit panel"
+          className="absolute left-3 top-3 z-20 rounded-lg border border-gray-700 bg-gray-900/85 p-1.5 text-gray-300 backdrop-blur hover:text-gray-100"
+        ><ChevronRight size={16} /></button>
+      )}
+      <div className={`absolute inset-y-0 left-0 z-20 flex w-80 flex-col border-r border-gray-700 bg-gray-900/90 backdrop-blur transition-transform ${panelOpen ? '' : '-translate-x-full'}`}>
+        <div className="flex shrink-0 flex-col gap-1.5 border-b border-gray-700 p-2">
+          {/* Navigace a hlavní vypínač prezentace na jednom řádku — dřív zabíraly dva. */}
+          <div className="flex items-center gap-1">
+            <button onClick={onBackToEditor} title="Zpět do editoru modelu" className="flex items-center gap-1.5 rounded-lg bg-gray-800 px-2 py-1 text-xs text-gray-200 transition-colors hover:bg-gray-700">
+              <Box size={14} /> Editor
             </button>
-            {gridOn && (
-              <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
-                {gridNote || `Názvy odpovídají „dlazdice_<X>_<Y>" v exportu.`}
+            <button
+              onClick={togglePresent}
+              title={presentOn ? 'Skrýt popisky a pulz' : 'Zobrazit popisky a pulz'}
+              className={`flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${presentOn ? 'bg-sky-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}`}
+            >
+              {presentOn ? <Eye size={14} /> : <EyeOff size={14} />} Prezentace
+            </button>
+            <div className="flex-1" />
+            <button onClick={() => setPanelOpen(false)} title="Skrýt panel" className="rounded p-0.5 text-gray-500 hover:text-gray-200"><ChevronLeft size={16} /></button>
+          </div>
+          <form onSubmit={runSearch} className="flex items-center gap-1.5 rounded-lg bg-gray-800/70 p-1">
+            <Search size={15} className="ml-1.5 shrink-0 text-gray-500" />
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Najít místo (např. Liberec)…"
+              className="min-w-0 flex-1 bg-transparent text-sm text-gray-100 placeholder-gray-500 outline-none"
+            />
+            {searchErr && <span className="shrink-0 text-xs text-amber-400">{searchErr}</span>}
+            <button type="submit" disabled={searching} className="shrink-0 rounded-lg bg-emerald-600 px-2.5 py-1 text-sm text-white hover:bg-emerald-500 disabled:opacity-50">
+              {searching ? <Loader2 size={14} className="animate-spin" /> : 'Jdi'}
+            </button>
+          </form>
+        </div>
+
+        {/* Jediná scrollovaná oblast. Pořadí sekcí kopíruje postup práce: podklad → výběr →
+            co z výběru vzniklo → scéna → kamera → prezentace. Kontextové sekce (Parcely,
+            Dlaždice, …) stojí hned pod tím, co je vyrobilo, a revealSection k nim odscrolluje. */}
+        <div ref={panelScrollRef} className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-2">
+          <Section id="podklad" title="Podklad a překryvy" dflt={true} open={openSec} onToggle={toggleSec}>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1">Podklad</div>
+            <ToggleBtn active={base === 'ortofoto'} onClick={() => setBase('ortofoto')} icon={<Image size={15} />} label="Ortofoto ČR" />
+            <ToggleBtn active={base === 'zm'} onClick={() => setBase('zm')} icon={<MapIcon size={15} />} label={base === 'zm' ? `Topografická mapa (${ztmTier})` : 'Topografická mapa ČR'} />
+            {ENABLE_GOOGLE_3D && (
+              <ToggleBtn active={base === 'google'} onClick={() => setBase('google')} icon={googleLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="3D realita (Google)" />
+            )}
+            {ENABLE_GOOGLE_3D && base === 'google' ? (
+              <div className="flex flex-col gap-1 px-1 max-w-[190px]">
+                <div className="text-[10px] text-gray-500 leading-snug">
+                  {googleErr ? <span className="text-amber-400">{googleErr}</span> : <>Fotorealistické 3D. Posuvníkem prosvítíš mapu pod ním.</>}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 w-9 shrink-0">3D</span>
+                  <input type="range" min={0} max={1} step={0.05} value={googleAlpha} onChange={e => setGoogleAlpha(parseFloat(e.target.value))} className="flex-1 min-w-0 accent-cyan-500" title="Průhlednost 3D reality — vlevo jen mapa, vpravo plná 3D" />
+                  <span className="text-[10px] text-gray-300 tabular-nums w-8">{Math.round(googleAlpha * 100)}%</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-400 w-9 shrink-0">Pod</span>
+                  <button onClick={() => setGoogleUnder('ortofoto')} className={`px-1.5 py-0.5 rounded text-[11px] ${googleUnder === 'ortofoto' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>ortofoto</button>
+                  <button onClick={() => setGoogleUnder('zm')} className={`px-1.5 py-0.5 rounded text-[11px] ${googleUnder === 'zm' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>topo</button>
+                  <button onClick={() => setGoogleUnder('none')} title="Čistě 3D bez podkladu (skryje glóbus)" className={`px-1.5 py-0.5 rounded text-[11px] ${googleUnder === 'none' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>nic</button>
+                </div>
+                <div className="h-px bg-gray-700 my-0.5" />
+                <ToggleBtn active={katastrOn} onClick={() => setKatastrOn(v => !v)} icon={<Layers size={15} />} label="Katastr" />
+              </div>
+            ) : (
+              <>
+                <div className="h-px bg-gray-700 my-0.5" />
+                <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1">Překryv</div>
+                <ToggleBtn active={katastrOn} onClick={() => setKatastrOn(v => !v)} icon={<Layers size={15} />} label="Katastr" />
+              </>
+            )}
+            {ENABLE_OSM_BUILDINGS && (
+              <ToggleBtn active={osmOn} onClick={() => setOsmOn(v => !v)} icon={osmLoading ? <Loader2 size={15} className="animate-spin" /> : <Building2 size={15} />} label="Budovy (OSM)" />
+            )}
+            {ENABLE_LIBEREC_DISTRICTS && (
+              <ToggleBtn active={districtsOn} onClick={toggleDistricts} icon={districtsLoading ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} label="Městské části Liberce" />
+            )}
+            <div className="h-px bg-gray-700 my-0.5" />
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1">Pozadí</div>
+            <div className="flex flex-wrap items-center gap-1 px-1 max-w-[190px]">
+              {BG_MODES.map(m => (
+                <button key={m.id} onClick={() => setBgMode(m.id)} title={m.title}
+                  className={`px-1.5 py-0.5 rounded text-[11px] ${bgMode === m.id ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>{m.label}</button>
+              ))}
+              {bgMode === 'vlastni' && (
+                <input type="color" value={bgCustom} onChange={e => setBgCustom(e.target.value)} title="Barva pozadí"
+                  className="h-5 w-7 shrink-0 cursor-pointer rounded border border-gray-700 bg-transparent p-0" />
+              )}
+            </div>
+          </Section>
+          {districtsOn && selectedDistrict && (
+          <Section id="mestcast" title="Městská část" dflt={true} open={openSec} onToggle={toggleSec}>
+            <div className="flex items-center gap-1.5">
+              <Sparkles size={14} className="shrink-0 text-cyan-400" />
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-gray-100">{districtsRef.current.get(selectedDistrict)?.name}</span>
+              <button onClick={() => selectDistrict('')} title="Zrušit zvýraznění" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-800 hover:text-red-300">
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </Section>
+          )}
+          <Section id="vyber" title="Výběr v mapě" dflt={true} open={openSec} onToggle={toggleSec}>
+            <ToggleBtn active={parcelMode} onClick={toggleParcel} icon={parcelLoading ? <Loader2 size={15} className="animate-spin" /> : <MapPin size={15} />} label={parcelMode ? 'Klikni na parcelu' : 'Vybrat parcelu'} />
+            <ToggleBtn active={areaMode} onClick={toggleAreaMode} icon={areaLoading ? <Loader2 size={15} className="animate-spin" /> : <Hexagon size={15} />} label={areaMode ? `Klikej body (${areaPtCount})` : 'Vybrat oblast'} />
+            {areaMode && areaPtCount >= 3 && (
+              <button onClick={finalizeArea} disabled={areaLoading} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-orange-600 hover:bg-orange-500 text-white transition-colors disabled:opacity-50">
+                <Check size={15} /> Vybrat parcely uvnitř
+              </button>
+            )}
+            <ToggleBtn active={tileMode} onClick={toggleTileMode} icon={<Grid3x3 size={15} />} label={tileMode ? `Klikej / táhni (${tileCount})` : 'Vybrat dlaždice'} />
+            <ToggleBtn active={regionMode} onClick={() => setRegionMode(m => !m)} icon={regionBusy ? <Loader2 size={15} className="animate-spin" /> : <Landmark size={15} />} label={regionMode ? 'Klikni na mapu (kraj/obec)' : 'Vybrat území'} />
+            {regionMode && (
+              <div className="flex flex-col gap-1 px-1 pb-0.5 max-w-[200px]">
+                <div className="text-[10px] text-gray-500 leading-snug">Klikni na mapu, nebo napiš název:</div>
+                <form onSubmit={searchRegion} className="flex items-center gap-1">
+                  <input value={regionQuery} onChange={e => setRegionQuery(e.target.value)} placeholder="obec / kraj…" className="flex-1 min-w-0 bg-gray-800 rounded px-2 py-1 text-xs text-gray-100 outline-none placeholder:text-gray-600" />
+                  <button type="submit" title="Vyhledat" className="shrink-0 p-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700">{regionBusy ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}</button>
+                </form>
               </div>
             )}
-            <button
-              onClick={() => setExportKatastr(v => !v)}
-              title="Přibalit do zipu i hranice parcel (katastr) jako DXF křivky"
-              className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${exportKatastr ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
-            >
-              {exportKatastr ? <Check size={13} /> : <Layers size={13} />} Přidat katastr (DXF)
-            </button>
-            <button
-              onClick={() => setExportBuildings(v => !v)}
-              title="Přidat budovy z ČÚZK — výška a tvar střechy (plochá/sedlová/valbová) z výškových modelů, low-poly, hnědý materiál"
-              className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${exportBuildings ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
-            >
-              {exportBuildings ? <Check size={13} /> : <Building2 size={13} />} Přidat budovy
-            </button>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-500 w-11 shrink-0" title="Strop rozlišení spojené 2D mapy">Mapa px</span>
-              {[8192, 12288, 16384].map(s => (
-                <button
-                  key={s}
-                  onClick={() => setStitchMax(s)}
-                  title={s === 16384 ? 'Nejostřejší, ale ~1 GB paměti — u velkých oblastí může spadnout' : undefined}
-                  className={`px-1.5 py-0.5 rounded text-[11px] ${stitchMax === s ? 'bg-teal-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-                >{s / 1024}k</button>
-              ))}
-            </div>
-            {tileCount > 0 && (() => {
-              // odhad rozlišení spojené mapy pro aktuální výběr (nativní 20 cm/px, zastropováno)
-              let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity
-              for (const t of tilesRef.current.values()) { ix0 = Math.min(ix0, t.tile.ix); ix1 = Math.max(ix1, t.tile.ix); iy0 = Math.min(iy0, t.tile.iy); iy1 = Math.max(iy1, t.tile.iy) }
-              const spanX = (ix1 - ix0 + 1) * tileSize, spanY = (iy1 - iy0 + 1) * tileSize
-              const nW = spanX / 0.2, nH = spanY / 0.2
-              let sc = Math.min(1, stitchMax / Math.max(nW, nH))
-              if (nW * sc * nH * sc > 16384 * 16384) sc = Math.sqrt(16384 * 16384 / (nW * nH))
-              const cmpx = 0.2 / sc * 100
-              const W = Math.round(nW * sc), H = Math.round(nH * sc)
-              return (
+            {tileMode && (
+              <div className="flex flex-col gap-1 px-1 pb-0.5">
                 <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
-                  Ortofoto: {W}×{H} px · {cmpx.toFixed(0)} cm/px{sc >= 1 ? ' (nativní)' : ''}<br />
-                  <span className="text-gray-600">topo jen orientační podklad (menší)</span>
+                  Tažením maluješ přes víc dlaždic; tah, co začne na vybrané, naopak odebírá.
+                  <span className="text-gray-400"> Mapu tady posouváš pravým tlačítkem, zoom kolečkem.</span>
                 </div>
+                <button
+                  onClick={() => setGridOn(g => !g)}
+                  className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${gridOn ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                >
+                  {gridOn ? <Eye size={13} /> : <EyeOff size={13} />} Mřížka s názvy
+                </button>
+                {gridOn && (
+                  <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
+                    {gridNote || `Názvy odpovídají „dlazdice_<X>_<Y>" v exportu.`}
+                  </div>
+                )}
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500 w-11 shrink-0">Dlaždice</span>
+                  {TILE_SIZES.map(s => (
+                    <button
+                      key={s}
+                      onClick={() => changeTileSize(s)}
+                      className={`px-1.5 py-0.5 rounded text-[11px] ${tileSize === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                    >{s} m</button>
+                  ))}
+                </div>
+                {tileCount > 0 && (
+                  <div className="max-w-[190px] text-[10px] leading-snug text-gray-500">
+                    Kvalitu a export najdeš níž v sekci <span className="text-gray-300">Dlaždice</span>.
+                  </div>
+                )}
+              </div>
+            )}
+          </Section>
+          {parcelCount > 0 && (
+          <Section id="parcely" title="Parcely" dflt={true} badge={parcelCount} open={openSec} onToggle={toggleSec}>
+            <div className="flex items-center gap-1.5">
+              <MapPin size={14} className="shrink-0 text-cyan-400" />
+              <span className="min-w-0 flex-1 text-sm text-gray-200">Vybráno: <span className="font-medium">{parcelCount}</span></span>
+              <button onClick={clearAllParcels} title="Zrušit výběr všech parcel" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-800 hover:text-red-300">
+                <Trash2 size={14} />
+              </button>
+            </div>
+            {cutoutBusy ? (
+              <div className="flex items-center gap-2">
+                <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-700">
+                  {cutoutPct >= 0
+                    ? <div className="h-full bg-emerald-500 transition-[width] duration-200" style={{ width: `${Math.max(3, Math.round(cutoutPct * 100))}%` }} />
+                    : <div className="h-full w-1/3 animate-pulse bg-emerald-500/70" />}
+                </div>
+                <span className="shrink-0 whitespace-nowrap text-xs tabular-nums text-gray-300">{cutoutProgress || 'pracuji…'}</span>
+                <button onClick={() => abortRef.current?.abort()} title="Zrušit stahování" className="shrink-0 rounded p-0.5 text-gray-400 hover:text-red-300"><X size={14} /></button>
+              </div>
+            ) : (
+              <>
+                {/* Dřív to byla jedna dlouhá řada tlačítek — teď zvlášť „jak to vypadá" a „co z toho vyleze". */}
+                <div className="px-0.5 text-[10px] uppercase tracking-wide text-gray-500">Zobrazení v mapě</div>
+                <div className="grid grid-cols-2 gap-1">
+                  <button onClick={() => setParcelClip(m => m === 'hide' ? 'off' : 'hide')} title="Skrýt mapu (ortofoto/topo + terén + Google) uvnitř vybraných parcel" className={`flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-xs ${parcelClip === 'hide' ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
+                    <EyeOff size={13} /> Skrýt parcelu
+                  </button>
+                  <button onClick={() => setParcelClip(m => m === 'only' ? 'off' : 'only')} title="Nechat jen vybrané parcely a ztlumit okolí — nastav okraj a viditelnost okolí" className={`flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-xs ${parcelClip === 'only' ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
+                    <Hexagon size={13} /> Jen parcelu
+                  </button>
+                </div>
+                {ENABLE_GOOGLE_3D && (
+                  <button onClick={() => setParcelClip(m => m === 'g3d' ? 'off' : 'g3d')} title="Topografická mapa všude + Google 3D realita JEN uvnitř vybraných parcel (potřebuje ion token)" className={`flex items-center justify-center gap-1 rounded-lg px-2 py-1 text-xs ${parcelClip === 'g3d' ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
+                    <Building2 size={13} /> Google jen ve výběru
+                  </button>
+                )}
+                {parcelClip !== 'off' && (
+                  <label className="flex items-center gap-1.5" title="Rovnoměrně zvětšit (+) nebo zmenšit (−) hranici">
+                    <span className="w-14 shrink-0 text-[11px] text-gray-400">Okraj</span>
+                    <input type="range" min={-50} max={50} step={0.5} value={parcelBuffer} onChange={e => setParcelBuffer(parseFloat(e.target.value))} className="min-w-0 flex-1 accent-emerald-500" />
+                    <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-gray-300">{parcelBuffer > 0 ? '+' : ''}{parcelBuffer.toFixed(1)} m</span>
+                  </label>
+                )}
+                {parcelClip === 'g3d' && (
+                  <label className="flex items-center gap-1.5" title="Průhlednost 3D reality ve výběru — 100 % = plné 3D (topo pod ním skryté), níž = prosvítá topo mapa">
+                    <span className="w-14 shrink-0 text-[11px] text-gray-400">3D realita</span>
+                    <input type="range" min={0.1} max={1} step={0.05} value={googleAlpha} onChange={e => setGoogleAlpha(parseFloat(e.target.value))} className="min-w-0 flex-1 accent-emerald-500" />
+                    <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-gray-300">{Math.round(googleAlpha * 100)} %</span>
+                  </label>
+                )}
+                {parcelClip === 'only' && (
+                  <>
+                    <label className="flex items-center gap-1.5" title="Viditelnost okolní ZEMĚ — 0 % = černá/skrytá, 100 % = plně vidět">
+                      <span className="w-14 shrink-0 text-[11px] text-gray-400">Okolí</span>
+                      <input type="range" min={0} max={1} step={0.05} value={okoliVis} onChange={e => setOkoliVis(parseFloat(e.target.value))} className="min-w-0 flex-1 accent-emerald-500" />
+                      <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-gray-300">{Math.round(okoliVis * 100)} %</span>
+                    </label>
+                    <div className="flex items-center gap-1" title="Okolní 3D budovy: skrýt (čistá izolace) nebo nechat vidět (kontext)">
+                      <span className="w-14 shrink-0 text-[11px] text-gray-400">Okolní 3D</span>
+                      <button onClick={() => setKeep3DAround(false)} className={`rounded px-1.5 py-0.5 text-[11px] ${!keep3DAround ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>skrýt</button>
+                      <button onClick={() => setKeep3DAround(true)} className={`rounded px-1.5 py-0.5 text-[11px] ${keep3DAround ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>zobrazit</button>
+                    </div>
+                  </>
+                )}
+                <div className="flex gap-1">
+                  <button onClick={toggleParcelHighlight} title="Zap/vyp tyrkysové zvýraznění parcely (výběr i ořez zůstanou) — koukat na parcelu načisto" className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1 text-xs ${parcelHl ? 'bg-gray-800 text-gray-200 hover:bg-gray-700' : 'bg-emerald-600 text-white hover:bg-emerald-500'}`}>
+                    {parcelHl ? <Eye size={13} /> : <EyeOff size={13} />} Zvýraznění
+                  </button>
+                  <button onClick={() => setParcelMeasure(m => !m)} title="Kóty délek u každé strany + výměra uprostřed parcely. Počítá se v S-JTSK jako v katastru, takže čísla lícují s výměrou z KN." className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1 text-xs ${parcelMeasure ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
+                    <Ruler size={13} /> Měření
+                  </button>
+                </div>
+                {parcelMeasure && (
+                  <div className="rounded-lg bg-gray-800/60 px-2 py-1 text-[11px] text-gray-300">
+                    Výměra výběru: <span className="font-medium tabular-nums text-emerald-300">{fmtArea(measureSum.area)}</span>
+                    <span className="text-[10px] text-gray-500"> z KN</span>
+                    {Math.abs(measureSum.mapArea - measureSum.area) >= 1 && (
+                      <div className="mt-0.5 text-[10px] text-gray-400" title="Spočítáno z geometrie mapy — lícuje s kótami po obvodu a s DXF exportem. Výměra v KN není z mapy přepočítaná, je zapsaná.">
+                        z mapy <span className="tabular-nums">{fmtArea(measureSum.mapArea)}</span>
+                      </div>
+                    )}
+                    {measureSum.note && <div className="mt-0.5 text-[10px] text-amber-400/90">{measureSum.note}</div>}
+                  </div>
+                )}
+                <button onClick={resetClipping} title="Reset ořezu — vypnout masky i parcelový ořez, zobrazit celou mapu" className="flex items-center justify-center gap-1 rounded-lg bg-gray-800 px-2 py-1 text-xs text-gray-200 hover:bg-gray-700">
+                  <RotateCcw size={13} /> Reset ořezu
+                </button>
+                <div className="mt-0.5 border-t border-gray-700 px-0.5 pt-1.5 text-[10px] uppercase tracking-wide text-gray-500">Export výběru</div>
+                <button onClick={exportParcelCutout} title="Výřez terénu DMR 5G ořezaný na hranici výběru + zapečené ortofoto → zip (OBJ + MTL + JPEG + V-Ray) pro 3ds Max" className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-2 py-1.5 text-xs text-white hover:bg-sky-500">
+                  <Download size={13} /> Terén + ortofoto (OBJ)
+                </button>
+                {base === 'google' && (
+                  <button onClick={exportGoogleMesh} title="Vytáhnout mesh z Google 3D dlaždic pro vybranou oblast včetně fototextur (reference) → zip (OBJ + MTL + JPEG)" className="flex items-center gap-1.5 rounded-lg bg-teal-600 px-2 py-1.5 text-xs text-white hover:bg-teal-500">
+                    <Download size={13} /> Google mesh + textury (OBJ)
+                  </button>
+                )}
+                <button onClick={exportParcelsDxf} disabled={exporting} title="Export hranic parcel jako křivky (DXF pro 3ds Max)" className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2 py-1.5 text-xs text-white hover:bg-indigo-500 disabled:opacity-50">
+                  {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Hranice parcel (DXF)
+                </button>
+                <button onClick={captureParcelViews} title="Vyfotit vybranou budovu ze 4 stran (kamera obletí, počká na dokreslení) → zip PNG. Nejlepší v 3D realitě." className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-2 py-1.5 text-xs text-white hover:bg-violet-500">
+                  <Image size={13} /> 4 pohledy (PNG)
+                </button>
+              </>
+            )}
+          </Section>
+          )}
+          {tileCount > 0 && (
+          <Section id="dlazdice" title="Dlaždice" dflt={true} badge={tileCount} open={openSec} onToggle={toggleSec}>
+            <div className="flex items-center gap-1.5">
+              <Grid3x3 size={14} className="shrink-0 text-cyan-400" />
+              <span className="min-w-0 flex-1 text-sm text-gray-200">Vybráno: <span className="font-medium">{tileCount}</span> × {tileSize} m</span>
+              <button onClick={clearTiles} title="Zrušit výběr dlaždic" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-800 hover:text-red-300">
+                <Trash2 size={14} />
+              </button>
+            </div>
+            {tileBusy ? (
+              <div className="flex items-center gap-2">
+                <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-700">
+                  {tilePct >= 0
+                    ? <div className="h-full bg-emerald-500 transition-[width] duration-200" style={{ width: `${Math.max(3, Math.round(tilePct * 100))}%` }} />
+                    : <div className="h-full w-1/3 animate-pulse bg-emerald-500/70" />}
+                </div>
+                <span className="shrink-0 whitespace-nowrap text-xs tabular-nums text-gray-300">{tileProgress || 'pracuji…'}</span>
+                <button onClick={() => abortRef.current?.abort()} title="Zrušit stahování" className="shrink-0 rounded p-0.5 text-gray-400 hover:text-red-300"><X size={14} /></button>
+              </div>
+            ) : (
+              <>
+                {/* Nastavení exportu bývalo nahoře ve „Výběru" — nastavovalo se jinde, než se exportovalo. */}
+                <div className="px-0.5 text-[10px] uppercase tracking-wide text-gray-500">Co přibalit</div>
+                <button
+                  onClick={() => setExportKatastr(v => !v)}
+                  title="Přibalit do zipu i hranice parcel (katastr) jako DXF křivky"
+                  className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${exportKatastr ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                >
+                  {exportKatastr ? <Check size={13} /> : <Layers size={13} />} Přidat katastr (DXF)
+                </button>
+                <button
+                  onClick={() => setExportBuildings(v => !v)}
+                  title="Přidat budovy z ČÚZK — výška a tvar střechy (plochá/sedlová/valbová) z výškových modelů, low-poly, hnědý materiál"
+                  className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs transition-colors ${exportBuildings ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                >
+                  {exportBuildings ? <Check size={13} /> : <Building2 size={13} />} Přidat budovy
+                </button>
+                <div className="mt-0.5 px-0.5 text-[10px] uppercase tracking-wide text-gray-500">Kvalita</div>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500 w-11 shrink-0">Textura</span>
+                  {TEX_SIZES.map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setTexSize(s)}
+                      className={`px-1.5 py-0.5 rounded text-[11px] ${texSize === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                    >{s}</button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500 w-11 shrink-0">Terén</span>
+                  {MESH_STEPS.map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setMeshStep(s)}
+                      title={s === 3 ? 'Sedne na zdrojová data (body DMR 5G mají rozteč ~2,8 m)' : s === 2 ? 'Hustší než zdroj — jen interpoluje, 2× víc trojúhelníků' : 'Řidší než zdroj — ubere detail, ušetří trojúhelníky'}
+                      className={`px-1.5 py-0.5 rounded text-[11px] ${meshStep === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                    >{s} m</button>
+                  ))}
+                </div>
+                <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
+                  Ortofoto {(tileSize / texSize * 100).toFixed(0)} cm/px{tileSize / texSize < 0.2 ? ' (nad nativních 20 cm)' : ''}
+                  {' · '}
+                  {meshStep === 3 ? 'terén sedne na zdroj (body 5G mají ~2,8 m)' : meshStep === 2 ? 'terén hustší než zdroj — jen interpolace' : `terén po ${meshStep} m — řidší než zdroj`}
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500 w-11 shrink-0" title="Strop rozlišení spojené 2D mapy">Mapa px</span>
+                  {[8192, 12288, 16384].map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setStitchMax(s)}
+                      title={s === 16384 ? 'Nejostřejší, ale ~1 GB paměti — u velkých oblastí může spadnout' : undefined}
+                      className={`px-1.5 py-0.5 rounded text-[11px] ${stitchMax === s ? 'bg-teal-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                    >{s / 1024}k</button>
+                  ))}
+                </div>
+                {tileCount > 0 && (() => {
+                  // odhad rozlišení spojené mapy pro aktuální výběr (nativní 20 cm/px, zastropováno)
+                  let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity
+                  for (const t of tilesRef.current.values()) { ix0 = Math.min(ix0, t.tile.ix); ix1 = Math.max(ix1, t.tile.ix); iy0 = Math.min(iy0, t.tile.iy); iy1 = Math.max(iy1, t.tile.iy) }
+                  const spanX = (ix1 - ix0 + 1) * tileSize, spanY = (iy1 - iy0 + 1) * tileSize
+                  const nW = spanX / 0.2, nH = spanY / 0.2
+                  let sc = Math.min(1, stitchMax / Math.max(nW, nH))
+                  if (nW * sc * nH * sc > 16384 * 16384) sc = Math.sqrt(16384 * 16384 / (nW * nH))
+                  const cmpx = 0.2 / sc * 100
+                  const W = Math.round(nW * sc), H = Math.round(nH * sc)
+                  return (
+                    <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
+                      Ortofoto: {W}×{H} px · {cmpx.toFixed(0)} cm/px{sc >= 1 ? ' (nativní)' : ''}<br />
+                      <span className="text-gray-600">topo jen orientační podklad (menší)</span>
+                    </div>
+                  )
+                })()}
+                <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
+                  Vyveze se v reálných S-JTSK souřadnicích, bez posunu.
+                </div>
+                {(() => {
+                  const n = gridSize({ ix: 0, iy: 0, size: tileSize }, meshStep)
+                  const tris = tileCount * 2 * (n - 1) ** 2
+                  const mb = estimateObjBytes(tileCount, tileSize, meshStep) / 1e6
+                  const heavy = mb > 150
+                  return (
+                    <span className={`max-w-[190px] text-[10px] leading-snug ${heavy ? 'text-amber-400' : 'text-gray-500'}`} title={heavy ? 'Velký OBJ — zvaž řidší mřížku terénu nebo míň dlaždic' : undefined}>
+                      {tris >= 1e6 ? `~${(tris / 1e6).toFixed(1)} M trojúh.` : `~${Math.round(tris / 1e3)} k trojúh.`}
+                      {' · OBJ ~'}{mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`}
+                    </span>
+                  )
+                })()}
+                <div className="mt-0.5 border-t border-gray-700 px-0.5 pt-1.5 text-[10px] uppercase tracking-wide text-gray-500">Export výběru</div>
+                <button onClick={exportTilesObj} title="Čistý terén DMR 5G s ortofoto texturou → zip s OBJ + MTL + JPEG pro 3ds Max" className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-2 py-1.5 text-xs text-white hover:bg-sky-500">
+                  <Download size={13} /> Terén + ortofoto (OBJ)
+                </button>
+                <button onClick={exportStitchedMaps} title="Spojená 2D mapa přes výběr — ortofoto i topografická mapa jako jeden georeferencovaný obrázek (world file)" className="flex items-center gap-1.5 rounded-lg bg-teal-600 px-2 py-1.5 text-xs text-white hover:bg-teal-500">
+                  <Image size={13} /> Spojená mapa (2D)
+                </button>
+                {!LOCAL_TILES && (
+                  <button onClick={loadLocal2DMap} title="Napéct ortofoto vybrané oblasti do localu jako dlaždicovou pyramidu (nativní rozlišení, kvalita se nezhoršuje s velikostí, jde zoomovat hloub). Jednorázové stahování z ČÚZK (u větší oblasti to chvíli trvá), pak lokální/offline a uložené natrvalo. Nenapečené oblasti jedou dál z ČÚZK." className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2 py-1.5 text-xs text-white hover:bg-indigo-500">
+                    <ArrowDownToLine size={13} /> Načíst 2D lokálně
+                  </button>
+                )}
+              </>
+            )}
+          </Section>
+          )}
+          {(regionChoices.length > 0 || regionParts.length > 0 || regionName) && (
+          <Section id="uzemi" title="Správní území" dflt={true} open={openSec} onToggle={toggleSec}>
+            {regionChoices.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Landmark size={14} className="text-cyan-400 shrink-0" />
+                <span className="text-gray-400 text-xs shrink-0">Vyber:</span>
+                {regionChoices.map((u, i) => (
+                  <button key={i} onClick={() => isolateRegion(u)} title={`${u.level}: ${u.name}`} className="px-2 py-0.5 rounded-lg text-xs bg-gray-800 text-gray-200 hover:bg-emerald-600 hover:text-white">
+                    <span className="text-gray-500">{u.level}:</span> {u.name}
+                  </button>
+                ))}
+                {regionChoices.some(c => c.level === 'Obec') && (
+                  <button onClick={() => { const o = regionChoices.find(c => c.level === 'Obec'); if (o) loadParts(o.kod) }} title="Rozbalit katastrální území (části) obce" className="px-2 py-0.5 rounded-lg text-xs bg-gray-800 text-cyan-300 hover:bg-gray-700 flex items-center gap-1">
+                    {regionBusy ? <Loader2 size={12} className="animate-spin" /> : <ChevronDown size={12} />} Části (k.ú.)
+                  </button>
+                )}
+                <button onClick={() => setRegionChoices([])} title="Zavřít nabídku" className="p-0.5 rounded text-gray-400 hover:text-red-300"><X size={13} /></button>
+              </div>
+            )}
+            {regionParts.length > 0 && (
+              <div className="flex items-start gap-1.5">
+                <span className="text-gray-400 text-xs shrink-0 mt-1">Části:</span>
+                <div className="flex items-center gap-1 flex-wrap max-h-24 overflow-auto">
+                  {regionParts.map((u, i) => (
+                    <button key={i} onClick={() => isolateRegion(u)} title={u.name} className="px-2 py-0.5 rounded-lg text-xs bg-gray-800 text-gray-200 hover:bg-emerald-600 hover:text-white">{u.name}</button>
+                  ))}
+                </div>
+                <button onClick={() => setRegionParts([])} title="Zavřít části" className="p-0.5 rounded text-gray-400 hover:text-red-300 mt-0.5"><X size={13} /></button>
+              </div>
+            )}
+            {regionName && (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <Landmark size={14} className="shrink-0 text-cyan-400" />
+                  <span className="min-w-0 flex-1 truncate text-sm text-gray-200">Zvýrazněno: <span className="font-medium">{regionName}</span></span>
+                  <button onClick={clearRegion} title="Zrušit zvýraznění území" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-800 hover:text-red-300"><RotateCcw size={14} /></button>
+                </div>
+                <label className="flex items-center gap-1.5" title="Viditelnost okolí — 0 % = tmavé, 100 % = plně vidět">
+                  <span className="w-14 shrink-0 text-[11px] text-gray-400">Okolí</span>
+                  <input type="range" min={0} max={1} step={0.05} value={regionDim} onChange={e => setRegionDim(parseFloat(e.target.value))} className="min-w-0 flex-1 accent-emerald-500" />
+                  <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-gray-300">{Math.round(regionDim * 100)} %</span>
+                </label>
+                {cutoutBusy ? (
+                  <div className="flex items-center gap-2">
+                    <Loader2 size={13} className="shrink-0 animate-spin text-gray-300" />
+                    <span className="min-w-0 flex-1 truncate text-xs text-gray-300">{cutoutProgress || 'exportuji…'}</span>
+                    <button onClick={() => abortRef.current?.abort()} title="Zrušit export" className="shrink-0 rounded p-0.5 text-gray-400 hover:text-red-300"><X size={13} /></button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mt-0.5 border-t border-gray-700 px-0.5 pt-1.5 text-[10px] uppercase tracking-wide text-gray-500">Export území</div>
+                    <button onClick={exportRegionCutout} title="Výřez terénu DMR 5G + zapečené ortofoto ořezaný na hranici území → OBJ (velké území = hrubší mřížka / velký soubor)" className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-2 py-1.5 text-xs text-white hover:bg-sky-500"><Download size={13} /> Terén + ortofoto (OBJ)</button>
+                    <button onClick={exportRegionMaps} title="Spojená 2D mapa ořezaná na tvar území (jako výřez terénu) — ortofoto (PNG s alfou) + topo jako georeferencovaný obrázek (world file), okolí průhledné" className="flex items-center gap-1.5 rounded-lg bg-teal-600 px-2 py-1.5 text-xs text-white hover:bg-teal-500"><Image size={13} /> Spojená mapa (2D)</button>
+                    <button onClick={exportRegionKatastrDxf} disabled={exporting} title="Katastr území do DXF: hranice jednotlivých parcel (hladina PARCELY) + obrys území (HRANICE_UZEMI), reálné S-JTSK + výšky DMR → lícuje s Terén (OBJ) i dlaždicemi" className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2 py-1.5 text-xs text-white hover:bg-indigo-500 disabled:opacity-50">{exporting ? <Loader2 size={13} className="animate-spin" /> : <Layers size={13} />} Katastr (DXF)</button>
+                    <button onClick={exportRegionDxf} disabled={exporting} title="Jen obrys území jako uzavřená 3D křivka (DXF R12) drapovaná na DMR — lokální ENU rámec" className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2 py-1.5 text-xs text-white hover:bg-indigo-500 disabled:opacity-50">{exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Obrys území (DXF)</button>
+                    {!LOCAL_TILES && (
+                      <button onClick={loadRegionLocal2D} title="Napéct ortofoto území do localu jako dlaždicovou pyramidu (nativní rozlišení, jde zoomovat hloub). Jednorázové stahování z ČÚZK (u velkého území to chvíli trvá), pak lokální/offline a uložené natrvalo." className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2 py-1.5 text-xs text-white hover:bg-indigo-500"><ArrowDownToLine size={13} /> Načíst 2D lokálně</button>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </Section>
+          )}
+          <Section id="import" title="Import" dflt={false} open={openSec} onToggle={toggleSec}>
+            <button onClick={() => fileRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
+              <Upload size={15} /> Import modelu
+            </button>
+            <button onClick={() => dwgRef.current?.click()} disabled={drawingLoading} title="Nahrát výkres DXF/DWG a zobrazit ho na mapě (v S-JTSK se umístí na správné místo; DWG se převede přes WASM)" className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50">
+              {drawingLoading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Nahrát výkres (DXF/DWG)
+            </button>
+            <button onClick={() => loadSplat()} disabled={splatLoading || splatOn} title="TEST: načíst Gaussian splat (Schillerova rozhledna, Kryry) z Cesium ion a posadit na mapu" className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-fuchsia-600 hover:bg-fuchsia-500 text-white transition-colors disabled:opacity-50">
+              {splatLoading ? <Loader2 size={15} className="animate-spin" /> : <Box size={15} />} Splat (Kryry)
+            </button>
+          </Section>
+          {objects.length > 0 && (
+          <Section id="scena" title="Scéna" dflt={true} badge={objects.length} open={openSec} onToggle={toggleSec}>
+            {objects.map(o => {
+              const draw = o.kind === 'drawing' ? drawingsRef.current.get(o.id.replace('drawing-', '')) : null
+              const hasLayers = !!draw && draw.layers.length > 0
+              const isExpanded = hasLayers && expandedDrawings.has(o.id)
+              return (
+              <div key={o.id} className="flex flex-col">
+              <div
+                onClick={() => o.kind === 'model' ? selectObject(o.id) : o.kind === 'drawing' ? locateObject(o) : selectObject(null)}
+                className={`group flex items-center gap-1.5 px-2 py-1 rounded-lg text-sm cursor-pointer ${
+                  selectedId === o.id ? 'bg-emerald-600/25 text-emerald-100' : 'text-gray-300 hover:bg-gray-800'
+                }`}
+              >
+                {hasLayers ? (
+                  <button onClick={e => { e.stopPropagation(); toggleExpand(o.id) }} title={`Hladiny (${draw!.layers.length})`} className="shrink-0 -ml-1 p-0.5 rounded text-gray-400 hover:text-gray-100">
+                    {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  </button>
+                ) : null}
+                <span className="text-[10px] text-gray-500 w-9 shrink-0">{o.kind === 'model' ? 'model' : o.kind === 'parcel' ? 'parc' : o.kind === 'drawing' ? 'výkr' : 'ploch'}</span>
+                {renamingId === o.id ? (
+                  <input
+                    autoFocus value={renameDraft}
+                    onChange={e => setRenameDraft(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingId(null) }}
+                    onClick={e => e.stopPropagation()}
+                    className="flex-1 min-w-0 bg-gray-800 rounded px-1 text-gray-100 outline-none"
+                  />
+                ) : (
+                  <span
+                    className="flex-1 min-w-0 truncate"
+                    onDoubleClick={e => { if (o.kind === 'model') { e.stopPropagation(); setRenamingId(o.id); setRenameDraft(o.name) } }}
+                    title={o.name}
+                  >{o.name}</span>
+                )}
+                <button onClick={e => { e.stopPropagation(); locateObject(o) }} title="Zaměřit na mapě (odletět na místo)" className="shrink-0 p-0.5 rounded text-gray-400 hover:text-cyan-300">
+                  <Crosshair size={13} />
+                </button>
+                <button onClick={e => { e.stopPropagation(); toggleVisible(o) }} title="Zobrazit/skrýt" className="shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-100">
+                  {o.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                </button>
+                <button onClick={e => { e.stopPropagation(); deleteObject(o) }} title="Smazat" className="shrink-0 p-0.5 rounded text-gray-400 hover:text-red-300 opacity-0 group-hover:opacity-100">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              {isExpanded && draw && (() => {
+                const did = o.id.replace('drawing-', '')
+                const q = (layerFilter[o.id] || '').toLowerCase().trim()
+                const shown = q ? draw.layers.filter(l => l.name.toLowerCase().includes(q)) : draw.layers
+                const shownNames = shown.map(l => l.name)
+                const sel = layerSel[o.id] ?? EMPTY_NAMESET
+                const selCount = sel.size
+                const bulk = selCount > 0 ? [...sel] : shownNames // očka pracují nad výběrem, jinak nad zobrazenými
+                return (
+                <div className="ml-5 mb-1 mt-0.5 flex flex-col gap-0.5 border-l border-gray-700 pl-2">
+                  <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[10px] text-gray-400" onClick={e => e.stopPropagation()}>
+                    <span className="w-10 shrink-0">Výška</span>
+                    <input type="range" min={-100} max={100} step={0.5} value={drawH[did] ?? 0} onChange={e => setDrawingHeight(did, Number(e.target.value))} className="flex-1 min-w-0" />
+                    <span className="w-10 text-right tabular-nums shrink-0">{(drawH[did] ?? 0).toFixed(1)} m</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[10px] text-gray-400" onClick={e => e.stopPropagation()}>
+                    <span className="w-10 shrink-0">Průhled.</span>
+                    <input type="range" min={0.05} max={1} step={0.05} value={drawA[did] ?? 1} onChange={e => setDrawingAlpha(did, Number(e.target.value))} className="flex-1 min-w-0" />
+                    <span className="w-10 text-right tabular-nums shrink-0">{Math.round((drawA[did] ?? 1) * 100)} %</span>
+                  </div>
+                  <div className="flex items-center gap-1 px-1 pb-0.5">
+                    <Search size={11} className="shrink-0 text-gray-500" />
+                    <input
+                      value={layerFilter[o.id] || ''}
+                      onChange={e => setLayerFilter(f => ({ ...f, [o.id]: e.target.value }))}
+                      onClick={e => e.stopPropagation()}
+                      placeholder="hledat hladinu…"
+                      className="flex-1 min-w-0 bg-gray-800 rounded px-1 py-0.5 text-xs text-gray-100 outline-none placeholder:text-gray-600"
+                    />
+                    <button onClick={e => { e.stopPropagation(); setLayersVisibility(did, bulk, true) }} title={selCount > 0 ? `Zobrazit vybrané (${selCount})` : q ? 'Zobrazit nalezené' : 'Zobrazit vše'} className="shrink-0 p-0.5 rounded text-gray-400 hover:text-emerald-300"><Eye size={12} /></button>
+                    <button onClick={e => { e.stopPropagation(); setLayersVisibility(did, bulk, false) }} title={selCount > 0 ? `Skrýt vybrané (${selCount})` : q ? 'Skrýt nalezené' : 'Skrýt vše'} className="shrink-0 p-0.5 rounded text-gray-400 hover:text-red-300"><EyeOff size={12} /></button>
+                  </div>
+                  <div className="flex items-center gap-2 px-1 pb-0.5 text-[10px] text-gray-500">
+                    <span className={selCount > 0 ? 'text-emerald-300' : ''}>{selCount > 0 ? `${selCount} vybráno` : `${shown.length} hladin`}</span>
+                    <button onClick={e => { e.stopPropagation(); selectAllLayers(o.id, shownNames) }} className="hover:text-gray-200">vybrat vše</button>
+                    {selCount > 0 && <button onClick={e => { e.stopPropagation(); clearLayerSel(o.id) }} className="hover:text-gray-200">zrušit výběr</button>}
+                  </div>
+                  {shown.length === 0 ? (
+                    <div className="px-1 py-0.5 text-xs text-gray-600">žádná hladina</div>
+                  ) : shown.map(ly => {
+                    const isSel = sel.has(ly.name)
+                    return (
+                    <div
+                      key={ly.name}
+                      onMouseDown={e => { e.stopPropagation(); e.preventDefault(); startLayerDrag(o.id, ly.name, shownNames, e.shiftKey) }}
+                      onMouseEnter={() => dragOverLayer(o.id, ly.name)}
+                      title={`${ly.name} — klik označí, tažením označíš víc, Shift+klik rozsah`}
+                      className={`flex items-center gap-1.5 px-1 py-0.5 rounded text-xs cursor-pointer select-none ${isSel ? 'bg-emerald-600/25 text-emerald-100' : `hover:bg-gray-800 ${ly.visible ? 'text-gray-300' : 'text-gray-500'}`}`}
+                    >
+                      <span className="shrink-0 w-2.5 h-2.5 rounded-sm border border-gray-600" style={{ background: '#' + (ly.color & 0xffffff).toString(16).padStart(6, '0') }} />
+                      <span className="flex-1 min-w-0 truncate">{ly.name}</span>
+                      <button
+                        onMouseDown={e => e.stopPropagation()}
+                        onClick={e => { e.stopPropagation(); if (sel.has(ly.name)) setLayersVisibility(did, [...sel], !ly.visible); else toggleLayer(did, ly.name) }}
+                        title={sel.has(ly.name) ? `Zobrazit/skrýt všechny vybrané (${selCount})` : 'Zobrazit/skrýt tuto hladinu'}
+                        className="shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-100"
+                      >
+                        {ly.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+                      </button>
+                    </div>
+                    )
+                  })}
+                </div>
+                )
+              })()}
+              </div>
               )
-            })()}
+            })}
+          </Section>
+          )}
+          {placement && (
+          <Section id="model" title="Vybraný model" dflt={true} open={openSec} onToggle={toggleSec}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-medium text-gray-100 truncate">{objects.find(o => o.id === selectedId)?.name ?? 'Model'}</div>
+              <button onClick={() => selectedId && deleteModel(selectedId)} title="Odebrat model" className="shrink-0 p-1 rounded-lg text-gray-400 hover:text-red-300 hover:bg-gray-800">
+                <Trash2 size={15} />
+              </button>
+            </div>
+
+            <div className="flex gap-1.5">
+              <button
+                onClick={toggleMove}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
+                  moveMode ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+                }`}
+              >
+                <Move size={14} /> {moveMode ? 'Táhni model' : 'Přesunout'}
+              </button>
+              <button onClick={focusModel} title="Zaměřit kameru na model" className="px-2 py-1.5 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700">
+                <Crosshair size={15} />
+              </button>
+            </div>
+
+            <button onClick={dropToGround} className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-200 hover:bg-gray-700">
+              <ArrowDownToLine size={14} /> Posadit na terén
+            </button>
+
+            <button
+              onClick={() => setSectionOn(s => !s)}
+              title="Odříznout terén/Google svislou rovinou → profil model+terén (stavební řez)"
+              className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
+                sectionOn ? 'bg-cyan-600 text-white hover:bg-cyan-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+              }`}
+            >
+              <Layers size={14} /> {sectionOn ? 'Řez zapnutý' : 'Řez terénem'}
+            </button>
+            {sectionOn && (
+              <div className="flex flex-col gap-2 pl-1 border-l-2 border-cyan-700/50">
+                <NumRow label="Natočení řezu" value={sectionAz} min={0} max={359} step={1} unit="°" onChange={v => setSectionAz(v)} />
+                <NumRow label="Posun řezu" value={sectionOffset} min={-500} max={500} step={1} unit="m" onChange={v => setSectionOffset(v)} />
+                <button onClick={() => setSectionFlip(f => !f)} className="flex items-center justify-center gap-1.5 px-2 py-1 rounded-lg text-xs bg-gray-800 text-gray-300 hover:bg-gray-700">
+                  <RotateCcw size={13} /> Otočit stranu řezu
+                </button>
+              </div>
+            )}
+
+            {selectedId && modelsRef.current.get(selectedId)?.footprint && (
+              <button
+                onClick={() => selectedId && toggleExcavation(selectedId)}
+                title="Skrýt mapu (ortofoto/topo + terén + Google 3D) přesně pod/nad modelem podle jeho obrysu"
+                className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
+                  modelsRef.current.get(selectedId)?.excavate ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+                }`}
+              >
+                <Mountain size={14} /> {modelsRef.current.get(selectedId)?.excavate ? 'Mapa pod modelem skrytá' : 'Skrýt mapu pod modelem'}
+              </button>
+            )}
+
+            {selectedId && (
+              <button
+                onClick={() => selectedId && toggleOutline(selectedId)}
+                title="Zapnout/vypnout svítící obrys kolem modelu"
+                className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
+                  modelsRef.current.get(selectedId)?.outline ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+                }`}
+              >
+                <Sparkles size={14} /> {modelsRef.current.get(selectedId)?.outline ? 'Obrys zapnutý' : 'Obrys vypnutý'}
+              </button>
+            )}
+
+            <NumRow label="Výška nad terénem" value={placement.heightOffset} min={-20} max={200} step={0.1} unit="m" onChange={v => patch({ heightOffset: v })} />
+            <NumRow label="Otočení" value={placement.heading} min={0} max={359} step={1} unit="°" onChange={v => patch({ heading: v })} />
+            <NumRow label="Náklon (pitch)" value={placement.pitch} min={-45} max={45} step={0.5} unit="°" onChange={v => patch({ pitch: v })} />
+            <NumRow label="Náklon (roll)" value={placement.roll} min={-45} max={45} step={0.5} unit="°" onChange={v => patch({ roll: v })} />
+            <NumRow label="Měřítko" value={placement.scale} min={0.1} max={20} step={0.1} unit="×" onChange={v => patch({ scale: v })} />
+
+            <button onClick={() => patch({ heading: 0, pitch: 0, roll: 0 })} className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs bg-gray-800 text-gray-300 hover:bg-gray-700">
+              <RotateCcw size={13} /> Reset natočení
+            </button>
+
+            <div className="text-[10px] text-gray-500 leading-snug">
+              {placement.lat.toFixed(5)}, {placement.lon.toFixed(5)}
+            </div>
+          </Section>
+          )}
+          {splatOn && (
+          <Section id="splat" title="Gaussian splat (test)" dflt={true} open={openSec} onToggle={toggleSec}>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-100 font-medium flex items-center gap-1"><Box size={14} className="text-fuchsia-400" /> Splat (Kryry)</span>
+              <div className="flex items-center gap-1">
+                <button onClick={toggleSplatShow} title="Zobrazit/skrýt splat (ať vidíš ortofoto/terén pod ním)" className={`p-0.5 rounded ${splatShow ? 'text-fuchsia-300 hover:text-fuchsia-200' : 'text-gray-500 hover:text-gray-300'}`}>{splatShow ? <Eye size={14} /> : <EyeOff size={14} />}</button>
+                <button onClick={removeSplat} title="Odebrat splat" className="p-0.5 rounded text-gray-400 hover:text-red-300"><Trash2 size={14} /></button>
+              </div>
+            </div>
+            <div className="flex gap-1.5">
+              <button onClick={resetSplat} title="Skočit na Kryry + odhadnout velikost + narovnat — výchozí bod, když splat lítá/je obří/mrňavý" className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 flex items-center gap-1"><RotateCcw size={13} /> Na Kryry</button>
+              <button onClick={() => setSplatMove(m => { const nv = !m; if (nv) setSplatCP(false); return nv })} title="Táhni splat levým tlačítkem po terénu; mapu posouváš pravým tlačítkem" className={`flex-1 px-2 py-1 rounded-lg text-xs flex items-center justify-center gap-1 ${splatMove ? 'bg-fuchsia-600 text-white' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
+                <Move size={13} /> {splatMove ? 'Táhni (pravé=mapa)' : 'Posunout'}
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="text-gray-400 w-12 shrink-0">Měřítko</span>
+              <button onClick={() => updateSplat({ scale: splatP.scale / 2 })} className="px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200">÷2</button>
+              <input type="number" value={splatP.scale} step="0.1" onChange={e => updateSplat({ scale: Number(e.target.value) || 0.0001 })} className="w-full min-w-0 bg-gray-800 rounded px-1 py-0.5 text-gray-100 text-center" />
+              <button onClick={() => updateSplat({ scale: splatP.scale * 2 })} className="px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200">×2</button>
+            </div>
+            {([['Otočení', 'heading', -180, 180], ['Sklon', 'pitch', -180, 180], ['Náklon', 'roll', -180, 180], ['Výška', 'heightOffset', -300, 300]] as const).map(([lbl, key, mn, mx]) => (
+              <label key={key} className="flex items-center gap-1.5 text-xs">
+                <span className="text-gray-400 w-12 shrink-0">{lbl}</span>
+                <input type="range" min={mn} max={mx} step={1} value={splatP[key]} onChange={e => updateSplat({ [key]: Number(e.target.value) } as Partial<Placement>)} className="flex-1 min-w-0" />
+                <span className="text-gray-300 w-9 text-right tabular-nums shrink-0">{Math.round(splatP[key])}</span>
+              </label>
+            ))}
+            <div className="border-t border-gray-700 pt-2 mt-0.5 flex flex-col gap-1.5">
+              <button onClick={() => setSplatCP(m => { const nv = !m; if (nv) setSplatMove(false); return nv })} title="Vlícování: naklikej 3+ dvojice (bod na splatu ↔ tentýž bod na mapě), spočítám nejlepší usazení a splat skočí co nejblíž" className={`px-2 py-1 rounded-lg text-xs flex items-center justify-center gap-1 ${splatCP ? 'bg-fuchsia-600 text-white' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
+                <Crosshair size={13} /> {splatCP ? 'Vlícování zapnuto' : 'Vlícovat body (auto)'}
+              </button>
+              {splatCP && (
+                <>
+                  <div className="text-[10px] leading-snug text-gray-400">
+                    <span className={cpPending ? 'text-amber-300' : 'text-fuchsia-300'}>
+                      {cpPending ? '➋ Klikni, KAM to patří na ortofotu (skryj splat okem).' : '➊ SHORA klikni zem POD prvkem splatu (pata zdi, roh u země).'}
+                    </span>{' '}Dvojic: <span className="text-gray-200">{cpCount}</span> · klik vždy padne na TERÉN (splat chytit nejde) → koukej kolmo shora a měj splat postavený na zemi. Body rozházené (ne v přímce). Nehýbej splatem během klikání.
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button onClick={computeCP} disabled={cpCount < 3} className="flex-1 px-2 py-1 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40">Spočítat ({cpCount})</button>
+                    <button onClick={clearCP} className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200">Vymazat</button>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <button onClick={saveSplat} title="Uložit polohu/měřítko/natočení — splat se pak načte rovnou takhle zarovnaný (přežije refresh)" className="flex-1 px-2 py-1 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-500 text-white">Uložit</button>
+              <button onClick={flyToSplat} title="Zaostřit kameru na splat" className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200">Doletět</button>
+            </div>
+          </Section>
+          )}
+          <Section id="kamera" title="Kamera a pohledy" dflt={false} badge={camViews.length} open={openSec} onToggle={toggleSec}>
             <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-500 w-11 shrink-0">Dlaždice</span>
-              {TILE_SIZES.map(s => (
-                <button
-                  key={s}
-                  onClick={() => changeTileSize(s)}
-                  className={`px-1.5 py-0.5 rounded text-[11px] ${tileSize === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-                >{s} m</button>
+              <button onClick={camPerspective} title="Perspektivní pohled (běžná 3D kamera)" className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"><Mountain size={15} /> Persp.</button>
+              <button onClick={camTopOrtho} title="Pohled shora (ortho — jako půdorys/plán)" className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"><MapIcon size={15} /> Shora</button>
+            </div>
+            {/* FOV */}
+            <label className="flex items-center gap-1.5 text-xs border-t border-gray-700 pt-2">
+              <span className="text-gray-400 w-16 shrink-0">Zorný úhel</span>
+              <input type="range" min={20} max={100} step={1} value={fov} onChange={e => { const d = Number(e.target.value); setFov(d); applyFov(d) }} className="flex-1 min-w-0" />
+              <span className="w-8 text-right text-gray-300 tabular-nums">{fov}°</span>
+            </label>
+            {/* DOF */}
+            <div className="flex flex-col gap-1.5 border-t border-gray-700 pt-2">
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                <input type="checkbox" checked={dofOn} onChange={e => { setDofOn(e.target.checked); applyDof({ on: e.target.checked }) }} className="accent-sky-500" />
+                <span className="text-gray-200">Rozostření okrajů</span>
+              </label>
+              {dofOn && <>
+                <div className="flex gap-1">
+                  {([['circle', 'Kruh uprostřed'], ['dist', 'Podle vzdálenosti']] as const).map(([m, lbl]) => (
+                    <button
+                      key={m}
+                      onClick={() => { setDofMode(m); applyDof({ mode: m }) }}
+                      className={`flex-1 px-2 py-1 rounded-lg text-xs ${dofMode === m ? 'bg-sky-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'}`}
+                    >{lbl}</button>
+                  ))}
+                </div>
+                {dofMode === 'circle' ? <>
+                  <label className="flex items-center gap-1.5 text-xs">
+                    <span className="text-gray-400 w-16 shrink-0">Velikost</span>
+                    <input type="range" min={0.05} max={1.2} step={0.01} value={dofRadius} onChange={e => { const r = Number(e.target.value); setDofRadius(r); applyDof({ radius: r }) }} className="flex-1 min-w-0" title="Poloměr ostrého kruhu — 1,0 sahá k bližšímu okraji obrazovky" />
+                    <span className="w-12 text-right text-gray-300 tabular-nums">{Math.round(dofRadius * 100)} %</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs">
+                    <span className="text-gray-400 w-16 shrink-0">Přechod</span>
+                    <input type="range" min={0.01} max={0.8} step={0.01} value={dofFeather} onChange={e => { const f = Number(e.target.value); setDofFeather(f); applyDof({ feather: f }) }} className="flex-1 min-w-0" title="Šířka přechodu z ostrého do rozmazaného — nízká hodnota dá ostrou hranu kruhu" />
+                    <span className="w-12 text-right text-gray-300 tabular-nums">{Math.round(dofFeather * 100)} %</span>
+                  </label>
+                </> : <>
+                  <label className="flex items-center gap-1.5 text-xs">
+                    <span className="text-gray-400 w-16 shrink-0">Ostří v</span>
+                    <input type="range" min={10} max={3000} step={10} value={dofFocal} onChange={e => { const f = Number(e.target.value); setDofFocal(f); applyDof({ focal: f }) }} className="flex-1 min-w-0" />
+                    <span className="w-12 text-right text-gray-300 tabular-nums">{dofFocal} m</span>
+                  </label>
+                  <button onClick={dofFocusCenter} className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200">Zaostřit na střed pohledu</button>
+                </>}
+                <label className="flex items-center gap-1.5 text-xs">
+                  <span className="text-gray-400 w-16 shrink-0">Rozmazání</span>
+                  <input type="range" min={1} max={7} step={0.5} value={dofBlur} onChange={e => { const b = Number(e.target.value); setDofBlur(b); applyDof({ blur: b }) }} className="flex-1 min-w-0" />
+                  <span className="w-12 text-right text-gray-300 tabular-nums">{dofBlur}</span>
+                </label>
+              </>}
+            </div>
+            {/* Bloom */}
+            <label className="flex items-center gap-1.5 text-xs border-t border-gray-700 pt-2 cursor-pointer">
+              <input type="checkbox" checked={bloomOn} onChange={e => { setBloomOn(e.target.checked); applyBloom(e.target.checked) }} className="accent-sky-500" />
+              <span className="text-gray-200">Bloom (jemná záře)</span>
+            </label>
+            {/* Handheld — jemné chvění pohledu; ukládá se s pohledem, běží jen v prezentaci */}
+            <div className="flex flex-col gap-1.5 border-t border-gray-700 pt-2">
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer" title="Jemné rozechvění pohledu jako z ruky. Ukládá se s pohledem (tlačítko Uložit / ikona fotoaparátu), takže si ho dáš jen na záběry, kterým sluší. Pracuje jen opticky — kamera, přelety ani ovládání myší se tím nemění.">
+                <input type="checkbox" checked={shakeOn} onChange={e => setShakeOn(e.target.checked)} className="accent-sky-500" />
+                <span className="text-gray-200">Kamera z ruky (jemné chvění)</span>
+                {shakeOn && !presentOn && <span className="ml-auto shrink-0 text-[10px] text-amber-500/80">jen v prezentaci</span>}
+              </label>
+              {shakeOn && (
+                <label className="flex items-center gap-1.5 text-xs">
+                  <span className="text-gray-400 w-16 shrink-0">Intenzita</span>
+                  <input type="range" min={0.05} max={1} step={0.05} value={shakeAmt} onChange={e => setShakeAmt(Number(e.target.value))} className="flex-1 min-w-0" title="Délka tahu — i na 100 % je to asi stupeň, tedy pomalé plutí, ne třas" />
+                  <span className="w-12 text-right text-gray-300 tabular-nums">{Math.round(shakeAmt * 100)} %</span>
+                </label>
+              )}
+            </div>
+            {/* uložené pohledy */}
+            <div className="flex flex-col gap-1">
+              <div className="text-[10px] uppercase tracking-wide text-gray-500">Uložené pohledy</div>
+              <div className="flex gap-1">
+                <input value={camName} onChange={e => setCamName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') saveCamView() }} placeholder="název pohledu…" className="flex-1 min-w-0 bg-gray-800 rounded px-1.5 py-1 text-xs text-gray-100 outline-none placeholder:text-gray-600" />
+                <button onClick={saveCamView} title="Uložit aktuální pohled kamery" className="px-2 py-1 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-500 text-white">Uložit</button>
+              </div>
+              {camViews.map((cv, i) => (
+                <div key={i} className="flex items-center gap-1">
+                  <button
+                    onClick={() => gotoCamView(cv)}
+                    title={cv.look ? 'Přeletět a nastavit uložený zorný úhel a rozostření' : 'Přeletět. Tenhle pohled je z dřívějška a vzhled uložený nemá — přepiš ho ikonou fotoaparátu.'}
+                    className="flex-1 min-w-0 text-left truncate px-1.5 py-0.5 rounded text-xs bg-gray-800 hover:bg-sky-600 hover:text-white text-gray-200"
+                  >
+                    {cv.name}{!cv.look && <span className="ml-1 text-[9px] text-gray-500">bez vzhledu</span>}
+                  </button>
+                  <button onClick={() => updateCamView(i)} title="Přepsat tento pohled aktuální kamerou i nastavením" className="p-0.5 rounded text-gray-500 hover:text-emerald-300"><Camera size={13} /></button>
+                  <button onClick={() => delCamView(i)} title="Smazat" className="p-0.5 rounded text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
+                </div>
               ))}
+              {!camViews.length && <div className="text-[10px] text-gray-600 leading-snug">Zatím žádné — natoč si kameru, napiš název a dej „Uložit". Uloží se i zorný úhel, rozostření a chvění kamery. Přežijí refresh.</div>}
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer mt-0.5" title="Kamera nepoletí napřímo, ale obloukem kolem toho, na co zrovna koukáš — objekt uprostřed zůstane uprostřed.">
+                <input type="checkbox" checked={orbitOn} onChange={e => setOrbitOn(e.target.checked)} className="accent-sky-500" />
+                <span className="text-gray-200">Přelet obloukem (orbit kolem středu)</span>
+              </label>
             </div>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-500 w-11 shrink-0">Textura</span>
-              {TEX_SIZES.map(s => (
-                <button
-                  key={s}
-                  onClick={() => setTexSize(s)}
-                  className={`px-1.5 py-0.5 rounded text-[11px] ${texSize === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-                >{s}</button>
+          </Section>
+          {/* Popisky i pulz visí na uloženém pohledu a řídí je vypínač „Prezentace" nahoře —
+              patří k sobě, tak jsou v jedné sekci a ne rozstrkané pod kamerou. */}
+          <Section id="prezentace" title="Prezentace" dflt={false} badge={callouts.length + pulses.length} open={openSec} onToggle={toggleSec}>
+            <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+              <span className="shrink-0">Pohled:</span>
+              <span className="min-w-0 flex-1 truncate text-gray-300">{activeView ? activeView.name : 'žádný'}</span>
+              {!presentOn && <span className="shrink-0 text-amber-500/80">vypnutá</span>}
+            </div>
+            {!activeViewId && !!(callouts.length || pulses.length) && (
+              <div className="text-[10px] leading-snug text-amber-500/80">Není vybraný pohled, takže je vše zasunuté. Klikni na některý uložený pohled v sekci „Kamera a pohledy".</div>
+            )}
+            <Section id="popisky" title="Popisky" dflt={false} badge={callouts.length} open={openSec} onToggle={toggleSec}>
+              <button
+                onClick={() => setCalloutMode(m => !m)}
+                className={`px-2 py-1 rounded-lg text-xs ${calloutMode ? 'bg-sky-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'}`}
+              >{calloutMode ? 'Klikni do mapy…' : 'Přidat popisek'}</button>
+              {callouts.map(c => (
+                <div key={c.id} className={`flex flex-col gap-1 rounded p-1.5 ${calloutSel === c.id ? 'bg-sky-900/40 ring-1 ring-sky-700' : 'bg-gray-800/50'}`}>
+                  <div className="flex items-center gap-1">
+                    <input
+                      value={c.text}
+                      onChange={e => updateCallout(c.id, { text: e.target.value })}
+                      onFocus={() => setCalloutSel(c.id)}
+                      className="flex-1 min-w-0 bg-gray-900 rounded px-1.5 py-0.5 text-xs text-gray-100 outline-none"
+                    />
+                    <button onClick={() => delCallout(c.id)} title="Smazat popisek" className="p-0.5 rounded text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                    <input type="color" value={c.dot ?? DOT_DEFAULT} onChange={e => updateCallout(c.id, { dot: e.target.value })} title="Barva tečky" className="h-5 w-6 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0" />
+                    <input type="color" value={c.frame ?? FRAME_DEFAULT} onChange={e => updateCallout(c.id, { frame: e.target.value })} title="Barva rámečku a odpichové čáry" className="h-5 w-6 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0" />
+                    <input type="range" min={9} max={26} step={1} value={c.size ?? SIZE_DEFAULT} onChange={e => updateCallout(c.id, { size: Number(e.target.value) })} title="Velikost textu" className="min-w-0 flex-1 accent-sky-500" />
+                    <span className="w-9 shrink-0 text-right tabular-nums text-gray-500">{c.size ?? SIZE_DEFAULT} px</span>
+                  </div>
+                  <label className={`flex items-center gap-1.5 text-[11px] ${activeViewId ? 'cursor-pointer text-gray-300' : 'text-gray-600'}`} title={activeViewId ? 'Ve kterých pohledech se popisek ukáže' : 'Nejdřív vyber uložený pohled'}>
+                    <input type="checkbox" disabled={!activeViewId} checked={!!activeViewId && c.views.includes(activeViewId)} onChange={e => toggleCalloutHere(c.id, e.target.checked)} className="accent-sky-500" />
+                    <span>Ukázat v tomto pohledu</span>
+                    <span className="ml-auto tabular-nums text-gray-500">{c.views.length}×</span>
+                  </label>
+                </div>
               ))}
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-500 w-11 shrink-0">Terén</span>
-              {MESH_STEPS.map(s => (
-                <button
-                  key={s}
-                  onClick={() => setMeshStep(s)}
-                  title={s === 3 ? 'Sedne na zdrojová data (body DMR 5G mají rozteč ~2,8 m)' : s === 2 ? 'Hustší než zdroj — jen interpoluje, 2× víc trojúhelníků' : 'Řidší než zdroj — ubere detail, ušetří trojúhelníky'}
-                  className={`px-1.5 py-0.5 rounded text-[11px] ${meshStep === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-                >{s} m</button>
+              {!callouts.length && <div className="text-[10px] text-gray-600 leading-snug">Zatím žádné — vyber pohled, dej „Přidat popisek" a klikni do mapy. Bublinu pak přetáhneš myší.</div>}
+            </Section>
+            <Section id="pulz" title="Pulz parcel" dflt={false} badge={pulses.length} open={openSec} onToggle={toggleSec}>
+              <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                <input type="color" value={pulseColor} onChange={e => setPulseColor(e.target.value)} title="Barva pulzu" className="h-5 w-6 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0" />
+                <span className="shrink-0">pulzů</span>
+                <input type="range" min={1} max={12} step={1} value={pulseCount} onChange={e => setPulseCount(Number(e.target.value))} title="Kolikrát to blikne, pak přestane" className="min-w-0 flex-1 accent-sky-500" />
+                <span className="w-4 shrink-0 text-right tabular-nums text-gray-500">{pulseCount}</span>
+              </div>
+              <button
+                onClick={addPulseFromSelection}
+                disabled={!parcelCount}
+                title="Zapamatuje si tvar právě vybraných parcel jako novou sadu"
+                className="rounded-lg bg-gray-800 px-2 py-1 text-xs text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:hover:bg-gray-800"
+              >Přidat z vybraných parcel ({parcelCount})</button>
+              {pulses.map(p => (
+                <div key={p.id} className="flex flex-col gap-1 rounded bg-gray-800/50 p-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <input type="color" value={p.color} onChange={e => updatePulse(p.id, { color: e.target.value })} title="Barva této sady" className="h-4 w-5 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0" />
+                    <span className="min-w-0 flex-1 truncate text-xs text-gray-200">{p.name}</span>
+                    <button onClick={() => playPulse(p.id)} title="Přehrát teď" className="rounded p-0.5 text-gray-400 hover:text-sky-300"><Play size={13} /></button>
+                    <button onClick={() => delPulse(p.id)} title="Smazat sadu" className="rounded p-0.5 text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                    <span className="shrink-0">pulzů</span>
+                    <input type="range" min={1} max={12} step={1} value={p.count} onChange={e => updatePulse(p.id, { count: Number(e.target.value) })} className="min-w-0 flex-1 accent-sky-500" />
+                    <span className="w-4 shrink-0 text-right tabular-nums text-gray-500">{p.count}</span>
+                  </div>
+                  <label className={`flex items-center gap-1.5 text-[11px] ${activeViewId ? 'cursor-pointer text-gray-300' : 'text-gray-600'}`} title={activeViewId ? 'Ve kterých pohledech se pulz spustí' : 'Nejdřív vyber uložený pohled'}>
+                    <input type="checkbox" disabled={!activeViewId} checked={!!activeViewId && p.views.includes(activeViewId)} onChange={e => togglePulseHere(p.id, e.target.checked)} className="accent-sky-500" />
+                    <span>Spustit v tomto pohledu</span>
+                    <span className="ml-auto tabular-nums text-gray-500">{p.views.length}×</span>
+                  </label>
+                </div>
               ))}
-            </div>
-            <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
-              Ortofoto {(tileSize / texSize * 100).toFixed(0)} cm/px{tileSize / texSize < 0.2 ? ' (nad nativních 20 cm)' : ''}
-              {' · '}
-              {meshStep === 3 ? 'terén sedne na zdroj (body 5G mají ~2,8 m)' : meshStep === 2 ? 'terén hustší než zdroj — jen interpolace' : `terén po ${meshStep} m — řidší než zdroj`}
-            </div>
-            <div className="text-[10px] text-gray-500 leading-snug max-w-[190px]">
-              Vyveze se v reálných S-JTSK souřadnicích, bez posunu.
-            </div>
-          </div>
-        )}
-        <button onClick={() => fileRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
-          <Upload size={15} /> Import modelu
-        </button>
-        <button onClick={() => dwgRef.current?.click()} disabled={drawingLoading} title="Nahrát výkres DXF/DWG a zobrazit ho na mapě (v S-JTSK se umístí na správné místo; DWG se převede přes WASM)" className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50">
-          {drawingLoading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Nahrát výkres (DXF/DWG)
-        </button>
-        <button onClick={() => loadSplat()} disabled={splatLoading || splatOn} title="TEST: načíst Gaussian splat (Schillerova rozhledna, Kryry) z Cesium ion a posadit na mapu" className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-fuchsia-600 hover:bg-fuchsia-500 text-white transition-colors disabled:opacity-50">
-          {splatLoading ? <Loader2 size={15} className="animate-spin" /> : <Box size={15} />} Splat (Kryry)
-        </button>
-        <div className="flex items-center gap-1">
-          <button onClick={camPerspective} title="Perspektivní pohled (běžná 3D kamera)" className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"><Mountain size={15} /> Persp.</button>
-          <button onClick={camTopOrtho} title="Pohled shora (ortho — jako půdorys/plán)" className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"><MapIcon size={15} /> Shora</button>
+              {!pulses.length && <div className="text-[10px] text-gray-600 leading-snug">Zatím žádné — vyber parcely v mapě, nastav barvu a počet a dej „Přidat". Tvar se uloží, takže přežije refresh i zrušení výběru.</div>}
+            </Section>
+          </Section>
         </div>
-        {cacheInfo.count > 0 && (
-          <>
-            <div className="h-px bg-gray-700 my-0.5" />
+
+        <div className="flex shrink-0 flex-col gap-0.5 border-t border-gray-700 px-2 py-1.5">
+          {/* Obojí je „co leží na disku prohlížeče" — dřív byly napečené dlaždice sekcí nahoře
+              a cache dole, takže spolu zdánlivě nesouvisely. */}
+          {bakedInfo > 0 && (
+            <div className="flex items-center justify-between gap-2 px-1 text-[10px] text-gray-500">
+              <span title="Ortofoto napečené do localu — mapa jede offline a jde zoomovat hloub.">
+                Lokální mapa: <span className="text-gray-300">{bakedInfo}</span> dl. · ~{Math.round(bakedInfo * 0.06)} MB
+              </span>
+              <button
+                onClick={clearBaked}
+                title="Smazat celou lokální mapu (napečené dlaždice) — zpět na živé ČÚZK"
+                className="shrink-0 text-gray-500 hover:text-red-300"
+              >smazat</button>
+            </div>
+          )}
+          {cacheInfo.count > 0 && (
             <div className="flex items-center justify-between gap-2 px-1 text-[10px] text-gray-500">
               <span title="Data terénu a mapy uložená na disku prohlížeče (přežijí refresh, zrychlují návraty). LRU maže nejstarší přes strop.">
                 Cache: {(cacheInfo.bytes / 1e6).toFixed(0)} MB · {cacheInfo.count} pol.
@@ -3908,555 +4397,12 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
               <button
                 onClick={() => cacheClear().then(refreshCache)}
                 title="Smazat data z disku prohlížeče (cache terénu a mapy)"
-                className="text-gray-500 hover:text-red-300"
+                className="shrink-0 text-gray-500 hover:text-red-300"
               >vymazat</button>
             </div>
-          </>
-        )}
-      </div>
-
-      {/* vybraná městská část */}
-      {districtsOn && selectedDistrict && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-900/85 border border-cyan-500/40 backdrop-blur text-sm">
-          <Sparkles size={14} className="text-cyan-400" />
-          <span className="text-gray-100 font-medium">{districtsRef.current.get(selectedDistrict)?.name}</span>
-          <button onClick={() => selectDistrict('')} title="Zrušit zvýraznění" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
-            <Trash2 size={14} />
-          </button>
-        </div>
-      )}
-
-      {/* lišta vybraných dlaždic */}
-      {tileCount > 0 && (
-        <div className={`absolute ${parcelCount > 0 ? 'bottom-16' : 'bottom-3'} left-3 z-10 flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur text-sm`}>
-          <Grid3x3 size={14} className="text-cyan-400" />
-          <span className="text-gray-200">Dlaždice: <span className="font-medium">{tileCount}</span> × {tileSize} m</span>
-          {tileBusy ? (
-            <>
-              <div className="flex items-center gap-2 ml-1">
-                <div className="w-40 h-1.5 rounded-full bg-gray-700 overflow-hidden">
-                  {tilePct >= 0
-                    ? <div className="h-full bg-emerald-500 transition-[width] duration-200" style={{ width: `${Math.max(3, Math.round(tilePct * 100))}%` }} />
-                    : <div className="h-full w-1/3 bg-emerald-500/70 animate-pulse" />}
-                </div>
-                <span className="text-gray-300 text-xs tabular-nums whitespace-nowrap">{tileProgress || 'pracuji…'}</span>
-              </div>
-              <button
-                onClick={() => abortRef.current?.abort()}
-                title="Zrušit stahování"
-                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs"
-              >
-                <X size={13} /> Zrušit
-              </button>
-            </>
-          ) : (
-            <>
-              <span className="text-gray-500 text-xs">
-              {(() => {
-                const n = gridSize({ ix: 0, iy: 0, size: tileSize }, meshStep)
-                const tris = tileCount * 2 * (n - 1) ** 2
-                const mb = estimateObjBytes(tileCount, tileSize, meshStep) / 1e6
-                const heavy = mb > 150
-                return (
-                  <span className={heavy ? 'text-amber-400 text-xs' : 'text-gray-500 text-xs'} title={heavy ? 'Velký OBJ — zvaž řidší mřížku terénu nebo míň dlaždic' : undefined}>
-                    {tris >= 1e6 ? `~${(tris / 1e6).toFixed(1)} M trojúh.` : `~${Math.round(tris / 1e3)} k trojúh.`}
-                    {' · OBJ ~'}{mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`}
-                  </span>
-                )
-              })()}
-              </span>
-              <button
-                onClick={exportTilesObj}
-                title="Čistý terén DMR 5G s ortofoto texturou → zip s OBJ + MTL + JPEG pro 3ds Max"
-                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs"
-              >
-                <Download size={13} /> Terén + ortofoto (OBJ)
-              </button>
-              <button
-                onClick={exportStitchedMaps}
-                title="Spojená 2D mapa přes výběr — ortofoto i topografická mapa jako jeden georeferencovaný obrázek (world file)"
-                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs"
-              >
-                <Image size={13} /> Spojená mapa (2D)
-              </button>
-              {!LOCAL_TILES && (
-                <button
-                  onClick={loadLocal2DMap}
-                  title="Napéct ortofoto vybrané oblasti do localu jako dlaždicovou pyramidu (nativní rozlišení, kvalita se nezhoršuje s velikostí, jde zoomovat hloub). Jednorázové stahování z ČÚZK (u větší oblasti to chvíli trvá), pak lokální/offline a uložené natrvalo. Nenapečené oblasti jedou dál z ČÚZK."
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs"
-                >
-                  <ArrowDownToLine size={13} /> Načíst 2D lokálně
-                </button>
-              )}
-              <button onClick={clearTiles} title="Zrušit výběr dlaždic" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
-                <Trash2 size={14} />
-              </button>
-            </>
           )}
-        </div>
-      )}
-
-      {/* lokální mapa (napečené dlaždice) aktivní — kolik + možnost smazat, i bez výběru */}
-      {bakedInfo > 0 && (
-        <div className="absolute bottom-3 right-3 z-10 flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-900/85 border border-indigo-500/40 backdrop-blur text-sm">
-          <MapIcon size={14} className="text-indigo-400" />
-          <span className="text-gray-100">Lokální mapa: <span className="font-medium">{bakedInfo}</span> dl. · ~{Math.round(bakedInfo * 0.06)} MB</span>
-          <button onClick={clearBaked} title="Smazat celou lokální mapu (napečené dlaždice) — zpět na živé ČÚZK" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
-            <Trash2 size={14} />
-          </button>
-        </div>
-      )}
-
-      {/* TEST: doladění Gaussian splatu (Kryry) — syrový splat je v náhodné soustavě, tady ho srovnáš */}
-      {splatOn && (
-        <div className="absolute top-16 right-3 z-10 w-60 flex flex-col gap-2 px-3 py-2.5 rounded-xl bg-gray-900/90 border border-fuchsia-500/40 backdrop-blur text-sm">
-          <div className="flex items-center justify-between">
-            <span className="text-gray-100 font-medium flex items-center gap-1"><Box size={14} className="text-fuchsia-400" /> Splat (Kryry)</span>
-            <div className="flex items-center gap-1">
-              <button onClick={toggleSplatShow} title="Zobrazit/skrýt splat (ať vidíš ortofoto/terén pod ním)" className={`p-0.5 rounded ${splatShow ? 'text-fuchsia-300 hover:text-fuchsia-200' : 'text-gray-500 hover:text-gray-300'}`}>{splatShow ? <Eye size={14} /> : <EyeOff size={14} />}</button>
-              <button onClick={removeSplat} title="Odebrat splat" className="p-0.5 rounded text-gray-400 hover:text-red-300"><Trash2 size={14} /></button>
-            </div>
-          </div>
-          <div className="flex gap-1.5">
-            <button onClick={resetSplat} title="Skočit na Kryry + odhadnout velikost + narovnat — výchozí bod, když splat lítá/je obří/mrňavý" className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 flex items-center gap-1"><RotateCcw size={13} /> Na Kryry</button>
-            <button onClick={() => setSplatMove(m => { const nv = !m; if (nv) setSplatCP(false); return nv })} title="Táhni splat levým tlačítkem po terénu; mapu posouváš pravým tlačítkem" className={`flex-1 px-2 py-1 rounded-lg text-xs flex items-center justify-center gap-1 ${splatMove ? 'bg-fuchsia-600 text-white' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
-              <Move size={13} /> {splatMove ? 'Táhni (pravé=mapa)' : 'Posunout'}
-            </button>
-          </div>
-          <div className="flex items-center gap-1.5 text-xs">
-            <span className="text-gray-400 w-12 shrink-0">Měřítko</span>
-            <button onClick={() => updateSplat({ scale: splatP.scale / 2 })} className="px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200">÷2</button>
-            <input type="number" value={splatP.scale} step="0.1" onChange={e => updateSplat({ scale: Number(e.target.value) || 0.0001 })} className="w-full min-w-0 bg-gray-800 rounded px-1 py-0.5 text-gray-100 text-center" />
-            <button onClick={() => updateSplat({ scale: splatP.scale * 2 })} className="px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200">×2</button>
-          </div>
-          {([['Otočení', 'heading', -180, 180], ['Sklon', 'pitch', -180, 180], ['Náklon', 'roll', -180, 180], ['Výška', 'heightOffset', -300, 300]] as const).map(([lbl, key, mn, mx]) => (
-            <label key={key} className="flex items-center gap-1.5 text-xs">
-              <span className="text-gray-400 w-12 shrink-0">{lbl}</span>
-              <input type="range" min={mn} max={mx} step={1} value={splatP[key]} onChange={e => updateSplat({ [key]: Number(e.target.value) } as Partial<Placement>)} className="flex-1 min-w-0" />
-              <span className="text-gray-300 w-9 text-right tabular-nums shrink-0">{Math.round(splatP[key])}</span>
-            </label>
-          ))}
-          <div className="border-t border-gray-700 pt-2 mt-0.5 flex flex-col gap-1.5">
-            <button onClick={() => setSplatCP(m => { const nv = !m; if (nv) setSplatMove(false); return nv })} title="Vlícování: naklikej 3+ dvojice (bod na splatu ↔ tentýž bod na mapě), spočítám nejlepší usazení a splat skočí co nejblíž" className={`px-2 py-1 rounded-lg text-xs flex items-center justify-center gap-1 ${splatCP ? 'bg-fuchsia-600 text-white' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
-              <Crosshair size={13} /> {splatCP ? 'Vlícování zapnuto' : 'Vlícovat body (auto)'}
-            </button>
-            {splatCP && (
-              <>
-                <div className="text-[10px] leading-snug text-gray-400">
-                  <span className={cpPending ? 'text-amber-300' : 'text-fuchsia-300'}>
-                    {cpPending ? '➋ Klikni, KAM to patří na ortofotu (skryj splat okem).' : '➊ SHORA klikni zem POD prvkem splatu (pata zdi, roh u země).'}
-                  </span>{' '}Dvojic: <span className="text-gray-200">{cpCount}</span> · klik vždy padne na TERÉN (splat chytit nejde) → koukej kolmo shora a měj splat postavený na zemi. Body rozházené (ne v přímce). Nehýbej splatem během klikání.
-                </div>
-                <div className="flex gap-1.5">
-                  <button onClick={computeCP} disabled={cpCount < 3} className="flex-1 px-2 py-1 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40">Spočítat ({cpCount})</button>
-                  <button onClick={clearCP} className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200">Vymazat</button>
-                </div>
-              </>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5 mt-0.5">
-            <button onClick={saveSplat} title="Uložit polohu/měřítko/natočení — splat se pak načte rovnou takhle zarovnaný (přežije refresh)" className="flex-1 px-2 py-1 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-500 text-white">Uložit</button>
-            <button onClick={flyToSplat} title="Zaostřit kameru na splat" className="px-2 py-1 rounded-lg text-xs bg-gray-800 hover:bg-gray-700 text-gray-200">Doletět</button>
-          </div>
-        </div>
-      )}
-
-      {/* panel správního území — nabídka jednotek + izolace */}
-      {(regionChoices.length > 0 || regionParts.length > 0 || regionName) && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex flex-col gap-1.5 px-3 py-2 rounded-xl bg-gray-900/90 border border-gray-700 backdrop-blur text-sm max-w-[92vw]">
-          {regionChoices.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <Landmark size={14} className="text-cyan-400 shrink-0" />
-              <span className="text-gray-400 text-xs shrink-0">Vyber:</span>
-              {regionChoices.map((u, i) => (
-                <button key={i} onClick={() => isolateRegion(u)} title={`${u.level}: ${u.name}`} className="px-2 py-0.5 rounded-lg text-xs bg-gray-800 text-gray-200 hover:bg-emerald-600 hover:text-white">
-                  <span className="text-gray-500">{u.level}:</span> {u.name}
-                </button>
-              ))}
-              {regionChoices.some(c => c.level === 'Obec') && (
-                <button onClick={() => { const o = regionChoices.find(c => c.level === 'Obec'); if (o) loadParts(o.kod) }} title="Rozbalit katastrální území (části) obce" className="px-2 py-0.5 rounded-lg text-xs bg-gray-800 text-cyan-300 hover:bg-gray-700 flex items-center gap-1">
-                  {regionBusy ? <Loader2 size={12} className="animate-spin" /> : <ChevronDown size={12} />} Části (k.ú.)
-                </button>
-              )}
-              <button onClick={() => setRegionChoices([])} title="Zavřít nabídku" className="p-0.5 rounded text-gray-400 hover:text-red-300"><X size={13} /></button>
-            </div>
-          )}
-          {regionParts.length > 0 && (
-            <div className="flex items-start gap-1.5">
-              <span className="text-gray-400 text-xs shrink-0 mt-1">Části:</span>
-              <div className="flex items-center gap-1 flex-wrap max-h-24 overflow-auto">
-                {regionParts.map((u, i) => (
-                  <button key={i} onClick={() => isolateRegion(u)} title={u.name} className="px-2 py-0.5 rounded-lg text-xs bg-gray-800 text-gray-200 hover:bg-emerald-600 hover:text-white">{u.name}</button>
-                ))}
-              </div>
-              <button onClick={() => setRegionParts([])} title="Zavřít části" className="p-0.5 rounded text-gray-400 hover:text-red-300 mt-0.5"><X size={13} /></button>
-            </div>
-          )}
-          {regionName && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-gray-200">Zvýrazněno: <span className="font-medium">{regionName}</span></span>
-              <div className="flex items-center gap-1.5" title="Viditelnost okolí — 0 % = tmavé, 100 % = plně vidět">
-                <span className="text-[11px] text-gray-400">Okolí</span>
-                <input type="range" min={0} max={1} step={0.05} value={regionDim} onChange={e => setRegionDim(parseFloat(e.target.value))} className="w-24 accent-emerald-500" />
-                <span className="text-[11px] text-gray-300 tabular-nums w-9">{Math.round(regionDim * 100)} %</span>
-              </div>
-              {cutoutBusy ? (
-                <>
-                  <span className="text-gray-300 text-xs flex items-center gap-1"><Loader2 size={13} className="animate-spin" /> {cutoutProgress || 'exportuji…'}</span>
-                  <button onClick={() => abortRef.current?.abort()} title="Zrušit export" className="p-1 rounded text-gray-400 hover:text-red-300"><X size={13} /></button>
-                </>
-              ) : (
-                <>
-                  <button onClick={exportRegionCutout} title="Výřez terénu DMR 5G + zapečené ortofoto ořezaný na hranici území → OBJ (velké území = hrubší mřížka / velký soubor)" className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-sky-600 hover:bg-sky-500 text-white"><Download size={13} /> Terén (OBJ)</button>
-                  <button onClick={exportRegionMaps} title="Spojená 2D mapa ořezaná na tvar území (jako výřez terénu) — ortofoto (PNG s alfou) + topo jako georeferencovaný obrázek (world file), okolí průhledné" className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-teal-600 hover:bg-teal-500 text-white"><Image size={13} /> Spojená mapa (2D)</button>
-                  {!LOCAL_TILES && (
-                    <button onClick={loadRegionLocal2D} title="Napéct ortofoto území do localu jako dlaždicovou pyramidu (nativní rozlišení, jde zoomovat hloub). Jednorázové stahování z ČÚZK (u velkého území to chvíli trvá), pak lokální/offline a uložené natrvalo." className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-indigo-600 hover:bg-indigo-500 text-white"><ArrowDownToLine size={13} /> Načíst 2D lokálně</button>
-                  )}
-                  <button onClick={exportRegionKatastrDxf} disabled={exporting} title="Katastr území do DXF: hranice jednotlivých parcel (hladina PARCELY) + obrys území (HRANICE_UZEMI), reálné S-JTSK + výšky DMR → lícuje s Terén (OBJ) i dlaždicemi" className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50">{exporting ? <Loader2 size={13} className="animate-spin" /> : <Layers size={13} />} Katastr (DXF)</button>
-                  <button onClick={exportRegionDxf} disabled={exporting} title="Jen obrys území jako uzavřená 3D křivka (DXF R12) drapovaná na DMR — lokální ENU rámec" className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50">{exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Obrys (DXF)</button>
-                </>
-              )}
-              <button onClick={clearRegion} title="Zrušit zvýraznění území" className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-gray-800 text-gray-200 hover:bg-gray-700"><RotateCcw size={13} /> Zrušit</button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* lišta vybraných parcel (multi) */}
-      {parcelCount > 0 && (
-        <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur text-sm">
-          <MapPin size={14} className="text-cyan-400" />
-          <span className="text-gray-200">Parcely: <span className="font-medium">{parcelCount}</span></span>
-          {cutoutBusy ? (
-            <>
-              <div className="flex items-center gap-2 ml-1">
-                <div className="w-40 h-1.5 rounded-full bg-gray-700 overflow-hidden">
-                  {cutoutPct >= 0
-                    ? <div className="h-full bg-emerald-500 transition-[width] duration-200" style={{ width: `${Math.max(3, Math.round(cutoutPct * 100))}%` }} />
-                    : <div className="h-full w-1/3 bg-emerald-500/70 animate-pulse" />}
-                </div>
-                <span className="text-gray-300 text-xs tabular-nums whitespace-nowrap">{cutoutProgress || 'pracuji…'}</span>
-              </div>
-              <button onClick={() => abortRef.current?.abort()} title="Zrušit stahování" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs">
-                <X size={13} /> Zrušit
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={exportParcelCutout} title="Výřez terénu DMR 5G ořezaný na hranici výběru + zapečené ortofoto → zip (OBJ + MTL + JPEG + V-Ray) pro 3ds Max" className="ml-1 flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs">
-                <Download size={13} /> Terén + ortofoto (OBJ)
-              </button>
-              {base === 'google' && (
-                <button onClick={exportGoogleMesh} title="Vytáhnout surový mesh z Google 3D dlaždic pro vybranou oblast (reference, jen geometrie) → OBJ" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs">
-                  <Download size={13} /> Google mesh (OBJ)
-                </button>
-              )}
-              <button onClick={exportParcelsDxf} disabled={exporting} title="Export hranic parcel jako křivky (DXF pro 3ds Max)" className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs disabled:opacity-50">
-                {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} hranice (DXF)
-              </button>
-              <button onClick={captureParcelViews} title="Vyfotit vybranou budovu ze 4 stran (kamera obletí, počká na dokreslení) → zip PNG. Nejlepší v 3D realitě." className="flex items-center gap-1 px-2 py-1 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs">
-                <Image size={13} /> 4 pohledy (PNG)
-              </button>
-              <button onClick={() => setParcelClip(m => m === 'hide' ? 'off' : 'hide')} title="Skrýt mapu (ortofoto/topo + terén + Google) uvnitř vybraných parcel" className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${parcelClip === 'hide' ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
-                <EyeOff size={13} /> Skrýt parcelu
-              </button>
-              <button onClick={() => setParcelClip(m => m === 'only' ? 'off' : 'only')} title="Nechat jen vybrané parcely a ztlumit okolí — nastav okraj a viditelnost okolí" className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${parcelClip === 'only' ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
-                <Hexagon size={13} /> Jen parcelu
-              </button>
-              {ENABLE_GOOGLE_3D && (
-                <button onClick={() => setParcelClip(m => m === 'g3d' ? 'off' : 'g3d')} title="Topografická mapa všude + Google 3D realita JEN uvnitř vybraných parcel (potřebuje ion token)" className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${parcelClip === 'g3d' ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'}`}>
-                  <Building2 size={13} /> Google jen ve výběru
-                </button>
-              )}
-              {parcelClip !== 'off' && (
-                <div className="flex items-center gap-1.5 ml-1" title="Rovnoměrně zvětšit (+) nebo zmenšit (−) hranici">
-                  <span className="text-[11px] text-gray-400 whitespace-nowrap">Okraj</span>
-                  <input type="range" min={-50} max={50} step={0.5} value={parcelBuffer} onChange={e => setParcelBuffer(parseFloat(e.target.value))} className="w-24 accent-emerald-500" />
-                  <span className="text-[11px] text-gray-300 tabular-nums w-12">{parcelBuffer > 0 ? '+' : ''}{parcelBuffer.toFixed(1)} m</span>
-                </div>
-              )}
-              {parcelClip === 'g3d' && (
-                <div className="flex items-center gap-1.5" title="Průhlednost 3D reality ve výběru — 100 % = plné 3D (topo pod ním skryté), níž = prosvítá topo mapa">
-                  <span className="text-[11px] text-gray-400 whitespace-nowrap">3D</span>
-                  <input type="range" min={0.1} max={1} step={0.05} value={googleAlpha} onChange={e => setGoogleAlpha(parseFloat(e.target.value))} className="w-20 accent-emerald-500" />
-                  <span className="text-[11px] text-gray-300 tabular-nums w-9">{Math.round(googleAlpha * 100)} %</span>
-                </div>
-              )}
-              {parcelClip === 'only' && (
-                <div className="flex items-center gap-1.5" title="Viditelnost okolní ZEMĚ — 0 % = černá/skrytá, 100 % = plně vidět">
-                  <span className="text-[11px] text-gray-400 whitespace-nowrap">Okolí</span>
-                  <input type="range" min={0} max={1} step={0.05} value={okoliVis} onChange={e => setOkoliVis(parseFloat(e.target.value))} className="w-20 accent-emerald-500" />
-                  <span className="text-[11px] text-gray-300 tabular-nums w-9">{Math.round(okoliVis * 100)} %</span>
-                </div>
-              )}
-              {parcelClip === 'only' && (
-                <div className="flex items-center gap-1" title="Okolní 3D budovy: skrýt (čistá izolace) nebo nechat vidět (kontext)">
-                  <span className="text-[11px] text-gray-400 whitespace-nowrap">Okolní 3D</span>
-                  <button onClick={() => setKeep3DAround(false)} className={`px-1.5 py-0.5 rounded text-[11px] ${!keep3DAround ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>skrýt</button>
-                  <button onClick={() => setKeep3DAround(true)} className={`px-1.5 py-0.5 rounded text-[11px] ${keep3DAround ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>zobrazit</button>
-                </div>
-              )}
-              <button onClick={toggleParcelHighlight} title="Zap/vyp tyrkysové zvýraznění parcely (výběr i ořez zůstanou) — koukat na parcelu načisto" className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${parcelHl ? 'bg-gray-800 text-gray-200 hover:bg-gray-700' : 'bg-emerald-600 text-white hover:bg-emerald-500'}`}>
-                {parcelHl ? <Eye size={13} /> : <EyeOff size={13} />} Zvýraznění
-              </button>
-              <button onClick={resetClipping} title="Reset ořezu — vypnout masky i parcelový ořez, zobrazit celou mapu" className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-gray-800 text-gray-200 hover:bg-gray-700">
-                <RotateCcw size={13} /> Reset ořezu
-              </button>
-              <button onClick={clearAllParcels} title="Zrušit výběr všech parcel" className="p-0.5 rounded text-gray-400 hover:text-red-300 hover:bg-gray-800">
-                <Trash2 size={14} />
-              </button>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* panel Scéna — seznam objektů */}
-      {objects.length > 0 && (
-        <div className="absolute top-3 right-3 z-10 w-64 flex flex-col gap-1 p-2 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur max-h-[40vh] overflow-auto">
-          <div className="text-[10px] uppercase tracking-wide text-gray-500 px-1 mb-0.5">Scéna</div>
-          {objects.map(o => {
-            const draw = o.kind === 'drawing' ? drawingsRef.current.get(o.id.replace('drawing-', '')) : null
-            const hasLayers = !!draw && draw.layers.length > 0
-            const isExpanded = hasLayers && expandedDrawings.has(o.id)
-            return (
-            <div key={o.id} className="flex flex-col">
-            <div
-              onClick={() => o.kind === 'model' ? selectObject(o.id) : o.kind === 'drawing' ? locateObject(o) : selectObject(null)}
-              className={`group flex items-center gap-1.5 px-2 py-1 rounded-lg text-sm cursor-pointer ${
-                selectedId === o.id ? 'bg-emerald-600/25 text-emerald-100' : 'text-gray-300 hover:bg-gray-800'
-              }`}
-            >
-              {hasLayers ? (
-                <button onClick={e => { e.stopPropagation(); toggleExpand(o.id) }} title={`Hladiny (${draw!.layers.length})`} className="shrink-0 -ml-1 p-0.5 rounded text-gray-400 hover:text-gray-100">
-                  {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                </button>
-              ) : null}
-              <span className="text-[10px] text-gray-500 w-9 shrink-0">{o.kind === 'model' ? 'model' : o.kind === 'parcel' ? 'parc' : o.kind === 'drawing' ? 'výkr' : 'ploch'}</span>
-              {renamingId === o.id ? (
-                <input
-                  autoFocus value={renameDraft}
-                  onChange={e => setRenameDraft(e.target.value)}
-                  onBlur={commitRename}
-                  onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingId(null) }}
-                  onClick={e => e.stopPropagation()}
-                  className="flex-1 min-w-0 bg-gray-800 rounded px-1 text-gray-100 outline-none"
-                />
-              ) : (
-                <span
-                  className="flex-1 min-w-0 truncate"
-                  onDoubleClick={e => { if (o.kind === 'model') { e.stopPropagation(); setRenamingId(o.id); setRenameDraft(o.name) } }}
-                  title={o.name}
-                >{o.name}</span>
-              )}
-              <button onClick={e => { e.stopPropagation(); locateObject(o) }} title="Zaměřit na mapě (odletět na místo)" className="shrink-0 p-0.5 rounded text-gray-400 hover:text-cyan-300">
-                <Crosshair size={13} />
-              </button>
-              <button onClick={e => { e.stopPropagation(); toggleVisible(o) }} title="Zobrazit/skrýt" className="shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-100">
-                {o.visible ? <Eye size={13} /> : <EyeOff size={13} />}
-              </button>
-              <button onClick={e => { e.stopPropagation(); deleteObject(o) }} title="Smazat" className="shrink-0 p-0.5 rounded text-gray-400 hover:text-red-300 opacity-0 group-hover:opacity-100">
-                <Trash2 size={13} />
-              </button>
-            </div>
-            {isExpanded && draw && (() => {
-              const did = o.id.replace('drawing-', '')
-              const q = (layerFilter[o.id] || '').toLowerCase().trim()
-              const shown = q ? draw.layers.filter(l => l.name.toLowerCase().includes(q)) : draw.layers
-              const shownNames = shown.map(l => l.name)
-              const sel = layerSel[o.id] ?? EMPTY_NAMESET
-              const selCount = sel.size
-              const bulk = selCount > 0 ? [...sel] : shownNames // očka pracují nad výběrem, jinak nad zobrazenými
-              return (
-              <div className="ml-5 mb-1 mt-0.5 flex flex-col gap-0.5 border-l border-gray-700 pl-2">
-                <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[10px] text-gray-400" onClick={e => e.stopPropagation()}>
-                  <span className="w-10 shrink-0">Výška</span>
-                  <input type="range" min={-100} max={100} step={0.5} value={drawH[did] ?? 0} onChange={e => setDrawingHeight(did, Number(e.target.value))} className="flex-1 min-w-0" />
-                  <span className="w-10 text-right tabular-nums shrink-0">{(drawH[did] ?? 0).toFixed(1)} m</span>
-                </div>
-                <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[10px] text-gray-400" onClick={e => e.stopPropagation()}>
-                  <span className="w-10 shrink-0">Průhled.</span>
-                  <input type="range" min={0.05} max={1} step={0.05} value={drawA[did] ?? 1} onChange={e => setDrawingAlpha(did, Number(e.target.value))} className="flex-1 min-w-0" />
-                  <span className="w-10 text-right tabular-nums shrink-0">{Math.round((drawA[did] ?? 1) * 100)} %</span>
-                </div>
-                <div className="flex items-center gap-1 px-1 pb-0.5">
-                  <Search size={11} className="shrink-0 text-gray-500" />
-                  <input
-                    value={layerFilter[o.id] || ''}
-                    onChange={e => setLayerFilter(f => ({ ...f, [o.id]: e.target.value }))}
-                    onClick={e => e.stopPropagation()}
-                    placeholder="hledat hladinu…"
-                    className="flex-1 min-w-0 bg-gray-800 rounded px-1 py-0.5 text-xs text-gray-100 outline-none placeholder:text-gray-600"
-                  />
-                  <button onClick={e => { e.stopPropagation(); setLayersVisibility(did, bulk, true) }} title={selCount > 0 ? `Zobrazit vybrané (${selCount})` : q ? 'Zobrazit nalezené' : 'Zobrazit vše'} className="shrink-0 p-0.5 rounded text-gray-400 hover:text-emerald-300"><Eye size={12} /></button>
-                  <button onClick={e => { e.stopPropagation(); setLayersVisibility(did, bulk, false) }} title={selCount > 0 ? `Skrýt vybrané (${selCount})` : q ? 'Skrýt nalezené' : 'Skrýt vše'} className="shrink-0 p-0.5 rounded text-gray-400 hover:text-red-300"><EyeOff size={12} /></button>
-                </div>
-                <div className="flex items-center gap-2 px-1 pb-0.5 text-[10px] text-gray-500">
-                  <span className={selCount > 0 ? 'text-emerald-300' : ''}>{selCount > 0 ? `${selCount} vybráno` : `${shown.length} hladin`}</span>
-                  <button onClick={e => { e.stopPropagation(); selectAllLayers(o.id, shownNames) }} className="hover:text-gray-200">vybrat vše</button>
-                  {selCount > 0 && <button onClick={e => { e.stopPropagation(); clearLayerSel(o.id) }} className="hover:text-gray-200">zrušit výběr</button>}
-                </div>
-                {shown.length === 0 ? (
-                  <div className="px-1 py-0.5 text-xs text-gray-600">žádná hladina</div>
-                ) : shown.map(ly => {
-                  const isSel = sel.has(ly.name)
-                  return (
-                  <div
-                    key={ly.name}
-                    onMouseDown={e => { e.stopPropagation(); e.preventDefault(); startLayerDrag(o.id, ly.name, shownNames, e.shiftKey) }}
-                    onMouseEnter={() => dragOverLayer(o.id, ly.name)}
-                    title={`${ly.name} — klik označí, tažením označíš víc, Shift+klik rozsah`}
-                    className={`flex items-center gap-1.5 px-1 py-0.5 rounded text-xs cursor-pointer select-none ${isSel ? 'bg-emerald-600/25 text-emerald-100' : `hover:bg-gray-800 ${ly.visible ? 'text-gray-300' : 'text-gray-500'}`}`}
-                  >
-                    <span className="shrink-0 w-2.5 h-2.5 rounded-sm border border-gray-600" style={{ background: '#' + (ly.color & 0xffffff).toString(16).padStart(6, '0') }} />
-                    <span className="flex-1 min-w-0 truncate">{ly.name}</span>
-                    <button
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={e => { e.stopPropagation(); if (sel.has(ly.name)) setLayersVisibility(did, [...sel], !ly.visible); else toggleLayer(did, ly.name) }}
-                      title={sel.has(ly.name) ? `Zobrazit/skrýt všechny vybrané (${selCount})` : 'Zobrazit/skrýt tuto hladinu'}
-                      className="shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-100"
-                    >
-                      {ly.visible ? <Eye size={12} /> : <EyeOff size={12} />}
-                    </button>
-                  </div>
-                  )
-                })}
-              </div>
-              )
-            })()}
-            </div>
-            )
-          })}
-        </div>
-      )}
-
-      {/* panel manipulace s vybraným modelem */}
-      {placement && (
-        <div className="absolute z-10 w-64 flex flex-col gap-3 p-3 rounded-xl bg-gray-900/85 border border-gray-700 backdrop-blur" style={{ top: `calc(1.75rem + ${Math.min(objects.length, 6) * 1.85 + 2}rem)`, right: '0.75rem' }}>
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-sm font-medium text-gray-100 truncate">{objects.find(o => o.id === selectedId)?.name ?? 'Model'}</div>
-            <button onClick={() => selectedId && deleteModel(selectedId)} title="Odebrat model" className="shrink-0 p-1 rounded-lg text-gray-400 hover:text-red-300 hover:bg-gray-800">
-              <Trash2 size={15} />
-            </button>
-          </div>
-
-          <div className="flex gap-1.5">
-            <button
-              onClick={toggleMove}
-              className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
-                moveMode ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
-              }`}
-            >
-              <Move size={14} /> {moveMode ? 'Táhni model' : 'Přesunout'}
-            </button>
-            <button onClick={focusModel} title="Zaměřit kameru na model" className="px-2 py-1.5 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700">
-              <Crosshair size={15} />
-            </button>
-          </div>
-
-          <button onClick={dropToGround} className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-200 hover:bg-gray-700">
-            <ArrowDownToLine size={14} /> Posadit na terén
-          </button>
-
-          <button
-            onClick={() => setSectionOn(s => !s)}
-            title="Odříznout terén/Google svislou rovinou → profil model+terén (stavební řez)"
-            className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
-              sectionOn ? 'bg-cyan-600 text-white hover:bg-cyan-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
-            }`}
-          >
-            <Layers size={14} /> {sectionOn ? 'Řez zapnutý' : 'Řez terénem'}
-          </button>
-          {sectionOn && (
-            <div className="flex flex-col gap-2 pl-1 border-l-2 border-cyan-700/50">
-              <NumRow label="Natočení řezu" value={sectionAz} min={0} max={359} step={1} unit="°" onChange={v => setSectionAz(v)} />
-              <NumRow label="Posun řezu" value={sectionOffset} min={-500} max={500} step={1} unit="m" onChange={v => setSectionOffset(v)} />
-              <button onClick={() => setSectionFlip(f => !f)} className="flex items-center justify-center gap-1.5 px-2 py-1 rounded-lg text-xs bg-gray-800 text-gray-300 hover:bg-gray-700">
-                <RotateCcw size={13} /> Otočit stranu řezu
-              </button>
-            </div>
-          )}
-
-          {selectedId && modelsRef.current.get(selectedId)?.footprint && (
-            <button
-              onClick={() => selectedId && toggleExcavation(selectedId)}
-              title="Skrýt mapu (ortofoto/topo + terén + Google 3D) přesně pod/nad modelem podle jeho obrysu"
-              className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
-                modelsRef.current.get(selectedId)?.excavate ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
-              }`}
-            >
-              <Mountain size={14} /> {modelsRef.current.get(selectedId)?.excavate ? 'Mapa pod modelem skrytá' : 'Skrýt mapu pod modelem'}
-            </button>
-          )}
-
-          {selectedId && (
-            <button
-              onClick={() => selectedId && toggleOutline(selectedId)}
-              title="Zapnout/vypnout svítící obrys kolem modelu"
-              className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors ${
-                modelsRef.current.get(selectedId)?.outline ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-gray-800 text-gray-200 hover:bg-gray-700'
-              }`}
-            >
-              <Sparkles size={14} /> {modelsRef.current.get(selectedId)?.outline ? 'Obrys zapnutý' : 'Obrys vypnutý'}
-            </button>
-          )}
-
-          <NumRow label="Výška nad terénem" value={placement.heightOffset} min={-20} max={200} step={0.1} unit="m" onChange={v => patch({ heightOffset: v })} />
-          <NumRow label="Otočení" value={placement.heading} min={0} max={359} step={1} unit="°" onChange={v => patch({ heading: v })} />
-          <NumRow label="Náklon (pitch)" value={placement.pitch} min={-45} max={45} step={0.5} unit="°" onChange={v => patch({ pitch: v })} />
-          <NumRow label="Náklon (roll)" value={placement.roll} min={-45} max={45} step={0.5} unit="°" onChange={v => patch({ roll: v })} />
-          <NumRow label="Měřítko" value={placement.scale} min={0.1} max={20} step={0.1} unit="×" onChange={v => patch({ scale: v })} />
-
-          <button onClick={() => patch({ heading: 0, pitch: 0, roll: 0 })} className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs bg-gray-800 text-gray-300 hover:bg-gray-700">
-            <RotateCcw size={13} /> Reset natočení
-          </button>
-
-          <div className="text-[10px] text-gray-500 leading-snug">
-            {placement.lat.toFixed(5)}, {placement.lon.toFixed(5)}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function NumRow({ label, value, min, max, step, unit, onChange }: {
-  label: string; value: number; min: number; max: number; step: number; unit: string; onChange: (v: number) => void
-}) {
-  const clamp = (n: number) => Math.min(max, Math.max(min, n))
-  return (
-    <div>
-      <div className="flex justify-between items-center text-xs text-gray-400 mb-1">
-        <span>{label}</span>
-        <div className="flex items-center gap-1">
-          <input
-            type="number"
-            min={min} max={max} step={step}
-            value={Number(value.toFixed(2))}
-            onChange={e => { const n = Number(e.target.value); if (!Number.isNaN(n)) onChange(clamp(n)) }}
-            className="w-16 bg-gray-800 rounded px-1.5 py-0.5 text-right text-gray-100 tabular-nums outline-none focus:ring-1 focus:ring-emerald-500"
-          />
-          <span className="text-gray-500 w-2 text-center">{unit}</span>
         </div>
       </div>
-      <input
-        type="range"
-        min={min} max={max} step={step} value={value}
-        onChange={e => onChange(Number(e.target.value))}
-        className="w-full accent-emerald-500"
-      />
     </div>
-  )
-}
-
-function ToggleBtn({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${
-        active ? 'bg-emerald-600/25 text-emerald-200 border border-emerald-500/40' : 'text-gray-400 hover:bg-gray-800 border border-transparent'
-      }`}
-    >
-      {icon} {label}
-    </button>
   )
 }

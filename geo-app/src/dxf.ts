@@ -13,7 +13,11 @@
 export type DrawPrim =
   | { kind: 'poly'; pts: [number, number][]; layer: string; color: number }
   | { kind: 'point'; pt: [number, number]; layer: string; color: number }
-  | { kind: 'text'; pt: [number, number]; text: string; height: number; rot: number; layer: string; color: number }
+  | { kind: 'text'; pt: [number, number]; text: string; height: number; rot: number; hAlign: HAlign; vAlign: VAlign; layer: string; color: number }
+
+/** ukotvení textu k bodu `pt` — 0 vlevo/1 střed/2 vpravo, 0 účaří/1 střed/2 nahoře */
+export type HAlign = 0 | 1 | 2
+export type VAlign = 0 | 1 | 2
 
 export type DrawParse = { prims: DrawPrim[]; minX: number; minY: number; maxX: number; maxY: number }
 
@@ -117,6 +121,49 @@ const num = (props: Prop[], code: number, dflt = 0): number => {
 }
 const str = (props: Prop[], code: number): string | undefined => { for (const p of props) if (p.code === code) return p.value.trim(); return undefined }
 const flag = (props: Prop[], code: number): number => { const v = num(props, code, 0); return Number.isFinite(v) ? v : 0 }
+
+type Anchor = { x: number; y: number; hAlign: HAlign; vAlign: VAlign; rot: number }
+
+/**
+ * TEXT/ATTRIB: kotva a zarovnání.
+ *
+ * PAST: bod 10/20 je „první bod zarovnání" a je použitelný JEN u textu zarovnaného vlevo na účaří.
+ * Jakmile je 72 (vodorovně: 1 střed, 2 vpravo, 4 middle) nebo 73 (svisle) nenulové, skutečná
+ * pozice je v 11/21 a v 10/20 bývá nesmysl (často 0,0) — proto texty létaly mimo výkres a rozbíjely
+ * i bounding box celé kresby. U 72=3 (aligned) a 72=5 (fit) je text roztažený MEZI 10/20 a 11/21,
+ * takže kotvou zůstává 10/20.
+ */
+function textAnchor(props: Prop[]): Anchor {
+  const h = flag(props, 72), v = flag(props, 73)
+  const stretched = h === 3 || h === 5
+  const useSecond = !stretched && (h !== 0 || v !== 0)
+  return {
+    x: useSecond ? num(props, 11) : num(props, 10),
+    y: useSecond ? num(props, 21) : num(props, 20),
+    hAlign: stretched ? 0 : h === 1 || h === 4 ? 1 : h === 2 ? 2 : 0,
+    vAlign: stretched ? 0 : h === 4 || v === 2 ? 1 : v === 3 ? 2 : 0, // 72=4 (middle) = svisle na střed
+    rot: num(props, 50) * Math.PI / 180,
+  }
+}
+
+/**
+ * MTEXT: kotva je vždy 10/20, zarovnání dává 71 (1=vlevo nahoře … 9=vpravo dole).
+ *
+ * PAST: 11/21/31 u MTEXTu NENÍ druhý bod zarovnání jako u TEXTu, ale směrový vektor osy X — a má
+ * PŘEDNOST před úhlem v 50. Kreslení podle 50 proto u otočených MTEXTů dávalo špatný sklon.
+ * (Specifikace DXF navíc u MTEXT/50 chybně uvádí radiány; AutoCAD píše stupně.)
+ */
+function mtextAnchor(props: Prop[]): Anchor {
+  const ap = flag(props, 71) || 1
+  const dx = num(props, 11), dy = num(props, 21)
+  return {
+    x: num(props, 10),
+    y: num(props, 20),
+    hAlign: ((ap - 1) % 3) as HAlign,
+    vAlign: ap <= 3 ? 2 : ap <= 6 ? 1 : 0,
+    rot: dx || dy ? Math.atan2(dy, dx) : num(props, 50) * Math.PI / 180,
+  }
+}
 
 /** rozparsuje DXF na hladiny + bloky + entity model space; nikdy nevyhazuje na nečekané hodnoty */
 function parseStructure(toks: Prop[]) {
@@ -249,6 +296,18 @@ export function dxfToPrims(text: string): DrawParse {
     const pts = raw.map(([x, y]) => { const p = apply(tf, x, y); track(p[0], p[1]); return p })
     prims.push({ kind: 'poly', pts, layer, color })
   }
+  // Text musí sledovat transformaci bloku: INSERT může být otočený i vnořený, takže sklon i výšku
+  // bereme z výsledné matice, ne jen z group codů entity.
+  const pushText = (props: Prop[], a: Anchor, txt: string, tf: Affine, layer: string, color: number) => {
+    const p = apply(tf, a.x, a.y); track(p[0], p[1])
+    const scaleY = Math.hypot(tf.c, tf.d) || 1
+    prims.push({
+      kind: 'text', pt: p, text: txt, layer, color,
+      height: num(props, 40, 2) * scaleY,
+      rot: a.rot + Math.atan2(tf.b, tf.a),
+      hAlign: a.hAlign, vAlign: a.vAlign,
+    })
+  }
 
   const emit = (e: RawEnt, tf: Affine, inherit: number, depth: number) => {
     const layer = str(e.props, 8) ?? '0'
@@ -312,10 +371,8 @@ export function dxfToPrims(text: string): DrawParse {
       case 'MTEXT': {
         const raw = e.props.filter(p => p.code === 1 || p.code === 3).map(p => p.value).join('')
         const clean = cleanDxfText(raw)
-        if (clean) {
-          const p = apply(tf, num(e.props, 10), num(e.props, 20)); track(p[0], p[1])
-          prims.push({ kind: 'text', pt: p, text: clean, height: num(e.props, 40, 2) * Math.hypot(tf.a, tf.b), rot: num(e.props, 50) * Math.PI / 180, layer, color })
-        }
+        // TEXT a MTEXT vypadají podobně, ale kotvu i rotaci kódují jinak — viz textAnchor/mtextAnchor
+        if (clean) pushText(e.props, e.type === 'MTEXT' ? mtextAnchor(e.props) : textAnchor(e.props), clean, tf, layer, color)
         break
       }
       case 'INSERT': {
@@ -326,16 +383,12 @@ export function dxfToPrims(text: string): DrawParse {
         const blk = blocks[str(e.props, 2) ?? '']
         if (blk?.entities.length) { const t2 = compose(tf, local); for (const be of blk.entities) emit(be, t2, color, depth + 1) }
         // ATTRIB (hodnoty atributů) — pozice už je v prostoru INSERTu, kreslíme přes `tf`.
-        // U zarovnaného textu (72/73 != 0) je skutečná pozice v 11/21, jinak v 10/20.
+        // Zarovnání se čte stejně jako u TEXTu (ATTRIB má tytéž group cody).
         for (const at of e.vertices) {
           if (at.type !== 'ATTRIB') continue
           const clean = cleanDxfText(at.props.filter(pp => pp.code === 1 || pp.code === 3).map(pp => pp.value).join(''))
           if (!clean) continue
-          const aligned = flag(at.props, 72) !== 0 || flag(at.props, 73) !== 0
-          const ax = aligned ? num(at.props, 11) : num(at.props, 10)
-          const ay = aligned ? num(at.props, 21) : num(at.props, 20)
-          const p = apply(tf, ax, ay); track(p[0], p[1])
-          prims.push({ kind: 'text', pt: p, text: clean, height: num(at.props, 40, 2) * Math.hypot(tf.a, tf.b), rot: num(at.props, 50) * Math.PI / 180, layer: str(at.props, 8) ?? layer, color: colorOf(at, color) })
+          pushText(at.props, textAnchor(at.props), clean, tf, str(at.props, 8) ?? layer, colorOf(at, color))
         }
         break
       }
