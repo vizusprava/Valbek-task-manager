@@ -17,6 +17,8 @@ import { buildTextPrims } from './dxfText'
 import { createCircleDofStage, type CircleDofUniforms } from './dofCircle'
 import { CalloutLayer, DOT_DEFAULT, FRAME_DEFAULT, SIZE_DEFAULT, type Callout } from './callouts'
 import { PulseLayer, PULSE_COLOR_DEFAULT, PULSE_COUNT_DEFAULT, type PulseSet } from './pulse'
+// pozn.: `Ruler` je i ikona z lucide-react → typ si přejmenujeme, ať se to nepere
+import { RulerLayer, fmtLen, rulerTotals, type Ruler as RulerData, type RulerPoint } from './ruler'
 import { applyBackground, BG_MODES, type BgMode } from './background'
 import proj4 from 'proj4'
 import polygonClipping from 'polygon-clipping'
@@ -258,6 +260,18 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const [cutoutProgress, setCutoutProgress] = useState('') // textový popis fáze
   // výběr oblasti: naklikat body → vybrat všechny parcely uvnitř polygonu
   const [areaMode, setAreaMode] = useState(false)
+  // ── ruční měření vzdáleností ────────────────────────────────────────────────────────────────
+  // Hotová měření žijí ve stavu (a v localStorage), rozkreslené se pozná podle `rulerDraftId`.
+  // Vrstva si kreslení řídí sama (ruler.ts) a čte živá data, takže tažení bodu nemusí přes React.
+  const [rulerMode, setRulerMode] = useState(false)
+  const [rulers, setRulers] = useState<RulerData[]>(() => {
+    try { const j = JSON.parse(localStorage.getItem('geo.mereni') || '[]'); return Array.isArray(j) ? j as RulerData[] : [] } catch { return [] }
+  })
+  const [rulerDraftId, setRulerDraftId] = useState<string | null>(null)
+  const [rulerSel, setRulerSel] = useState<string | null>(null)
+  const rulerLayerRef = useRef<RulerLayer | null>(null)
+  const rulersRef = useRef(rulers); rulersRef.current = rulers
+  const rulerDraftRef = useRef<string | null>(null); rulerDraftRef.current = rulerDraftId
   const [areaPtCount, setAreaPtCount] = useState(0)
   const [areaLoading, setAreaLoading] = useState(false)
   const areaPtsRef = useRef<Cesium.Cartesian3[]>([])
@@ -1063,6 +1077,133 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     }
   }
 
+
+  // ── měření: vrstva, ukládání a ovládání myší ────────────────────────────────────────────────
+  function persistRulers(rs: RulerData[]) {
+    setRulers(rs)
+    try { localStorage.setItem('geo.mereni', JSON.stringify(rs)) } catch { /* */ }
+  }
+
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    const layer = new RulerLayer(v)
+    rulerLayerRef.current = layer
+    return () => { layer.destroy(); rulerLayerRef.current = null }
+  }, [viewerReady])
+
+  useEffect(() => { rulerLayerRef.current?.sync(rulers, rulerSel) }, [rulers, rulerSel, viewerReady])
+
+  /**
+   * Klikání a tažení bodů měření.
+   *
+   * Tažení má přednost před přidáním bodu: LEFT_DOWN se nejdřív podívá, jestli pod kurzorem není
+   * existující bod. Když je, vypne se ovládání kamery a bod jede za myší; teprve když není, nechá
+   * se událost projít a bod se přidá až na LEFT_CLICK (tedy po puštění, ne při tažení kamery).
+   *
+   * Během tažení se zapisuje rovnou do živých dat vrstvy — do Reactu se výsledek propíše až po
+   * puštění, jinak by se při každém pohybu myší překresloval celý panel.
+   *
+   * Bod se bere z povrchu i s výškou (`pickGround` čte terén, modely i Google dlaždice), takže
+   * měření sedí i na svahu a na budově.
+   */
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed() || !rulerMode) return
+    const layer = rulerLayerRef.current
+    if (!layer) return
+    const handler = new Cesium.ScreenSpaceEventHandler(v.scene.canvas)
+    const ssc = v.scene.screenSpaceCameraController
+    let drag: { id: string; idx: number } | null = null
+    // Cesium pošle LEFT_CLICK i po velmi krátkém tažení (nepřekročí práh pohybu). Bez téhle
+    // pojistky by drobné posunutí bodu rovnou přidalo další bod na totéž místo.
+    // Nuluje se při KAŽDÉM stisku, ne až v kliku — po opravdovém tažení totiž LEFT_CLICK vůbec
+    // nepřijde a příznak by zůstal viset, takže by spolkl další klik.
+    let justDragged = false
+
+    const pointAt = (screen: Cesium.Cartesian2): RulerPoint | null => {
+      const g = pickGround(v, screen)
+      return g ? [g.lon, g.lat, g.height] : null
+    }
+
+    handler.setInputAction((e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+      justDragged = false
+      const h = layer.hit(v.scene.pick(e.position))
+      if (!h) return
+      drag = h
+      ssc.enableInputs = false
+      setRulerSel(h.id)
+    }, Cesium.ScreenSpaceEventType.LEFT_DOWN)
+
+    handler.setInputAction((e: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
+      if (!drag) return
+      const p = pointAt(e.endPosition)
+      if (p) layer.liveMove(drag.id, drag.idx, p)
+    }, Cesium.ScreenSpaceEventType.MOUSE_MOVE)
+
+    const endDrag = () => {
+      if (!drag) return
+      const moved = drag
+      drag = null
+      justDragged = true
+      ssc.enableInputs = true
+      // živá data vrstvy jsou zdroj pravdy — přepiš z nich stav, ať se posun uloží
+      persistRulers(rulersRef.current.map(r => r.id === moved.id ? { ...r, pts: [...r.pts] } : r))
+    }
+    handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.LEFT_UP)
+
+    handler.setInputAction((e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+      if (drag || justDragged) return // klik bezprostředně po tažení bod nepřidává
+      if (layer.hit(v.scene.pick(e.position))) return
+      const p = pointAt(e.position)
+      if (!p) { toast.error('Tady není povrch — klikni na terén nebo model'); return }
+      const draft = rulerDraftRef.current
+      if (draft) {
+        persistRulers(rulersRef.current.map(r => r.id === draft ? { ...r, pts: [...r.pts, p] } : r))
+      } else {
+        const id = `m${Date.now()}`
+        persistRulers([...rulersRef.current, { id, name: `Měření ${rulersRef.current.length + 1}`, pts: [p] }])
+        setRulerDraftId(id)
+        setRulerSel(id)
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
+
+    // pravý klik ukončí rozkreslené měření (kreslení dál pokračuje novým)
+    handler.setInputAction(() => finishRuler(), Cesium.ScreenSpaceEventType.RIGHT_CLICK)
+
+    return () => { handler.destroy(); ssc.enableInputs = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rulerMode])
+
+  /** ukončí rozkreslené měření; jednobodové zahodí (samotný bod nic neměří) */
+  function finishRuler() {
+    const draft = rulerDraftRef.current
+    if (!draft) return
+    const r = rulersRef.current.find(x => x.id === draft)
+    if (r && r.pts.length < 2) persistRulers(rulersRef.current.filter(x => x.id !== draft))
+    setRulerDraftId(null)
+  }
+
+  /** Zapnutí měření vypne ostatní klikací režimy — jinak by jeden klik dělal dvě věci naráz.
+   *  Hotová měření v mapě ale zůstávají, ta na režimu nezávisí. */
+  function toggleRulerMode() {
+    if (rulerMode) { finishRuler(); setRulerMode(false); return }
+    setMoveMode(false); setParcelMode(false); setTileMode(false); setRegionMode(false)
+    if (areaMode) { clearArea(); setAreaMode(false) }
+    setRulerMode(true)
+  }
+
+  function delRuler(id: string) {
+    persistRulers(rulersRef.current.filter(r => r.id !== id))
+    if (rulerDraftRef.current === id) setRulerDraftId(null)
+    if (rulerSel === id) setRulerSel(null)
+  }
+
+  function clearRulers() {
+    persistRulers([])
+    setRulerDraftId(null)
+    setRulerSel(null)
+  }
   function toggleAreaMode() {
     if (areaMode) { clearArea(); setAreaMode(false); return }
     exclusiveSelect('parcel'); setParcelMode(false) // oblast plní parcely → parcely nemazat, jen ostatní
@@ -1995,6 +2136,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   // vyčisti ostatní (jejich VÝBĚR i REŽIM), ať nejde mít „zaškrtnuté" víc věcí současně.
   function exclusiveSelect(keep: 'parcel' | 'tile' | 'region') {
     setMoveMode(false)
+    setRulerMode(false) // měření si taky bere klik — jinak by jeden klik dělal dvě věci
     if (keep !== 'parcel') { clearAllParcels(); setParcelMode(false); clearArea(); setAreaMode(false) }
     if (keep !== 'tile') { clearTiles(); setTileMode(false); setGridOn(false) }
     if (keep !== 'region') clearRegion()
@@ -3241,6 +3383,51 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
                     Kvalitu a export najdeš níž v sekci <span className="text-gray-300">Dlaždice</span>.
                   </div>
                 )}
+              </div>
+            )}
+          </Section>
+          <Section id="mereni" title="Měření" dflt={false} badge={rulers.length} open={openSec} onToggle={toggleSec}>
+            <ToggleBtn
+              active={rulerMode}
+              onClick={toggleRulerMode}
+              icon={<Ruler size={15} />}
+              label={rulerMode ? (rulerDraftId ? 'Klikej další body' : 'Klikni první bod') : 'Měřit vzdálenost'}
+            />
+            {rulerMode && (
+              <div className="max-w-[200px] px-1 text-[10px] leading-snug text-gray-500">
+                Každý klik přidá bod, u úseku se ukáže jeho délka. Bod jde chytit a přetáhnout jinam.
+                Měření ukončíš pravým klikem nebo tlačítkem níž — zůstane v mapě a můžeš začít další.
+              </div>
+            )}
+            {rulerMode && rulerDraftId && (
+              <button onClick={finishRuler} className="flex items-center gap-2 rounded-lg bg-amber-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-amber-500">
+                <Check size={15} /> Ukončit toto měření
+              </button>
+            )}
+            {rulers.map(r => {
+              const t = rulerTotals(r.pts)
+              return (
+                <div
+                  key={r.id}
+                  onMouseEnter={() => setRulerSel(r.id)}
+                  onMouseLeave={() => setRulerSel(s => (s === r.id ? null : s))}
+                  className={`flex items-center gap-1 rounded px-1 py-0.5 ${rulerSel === r.id ? 'bg-gray-700/50' : ''}`}
+                >
+                  <span className="min-w-0 flex-1 truncate text-xs text-gray-200">
+                    {r.name}
+                    {r.id === rulerDraftId && <span className="ml-1 text-[9px] text-amber-500/80">kreslí se</span>}
+                  </span>
+                  <span className="shrink-0 text-[11px] tabular-nums text-amber-300">{r.pts.length > 1 ? fmtLen(t.len) : '—'}</span>
+                  <button onClick={() => delRuler(r.id)} title="Smazat toto měření" className="shrink-0 rounded p-0.5 text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
+                </div>
+              )
+            })}
+            {rulers.length > 1 && (
+              <button onClick={clearRulers} className="self-start px-1 text-[10px] text-gray-500 hover:text-red-300">smazat všechna měření</button>
+            )}
+            {!rulers.length && !rulerMode && (
+              <div className="max-w-[200px] px-1 text-[10px] leading-snug text-gray-600">
+                Zatím žádné. Měří se v prostoru — bod se bere z povrchu i s výškou, takže sedí na svahu i na budově.
               </div>
             )}
           </Section>
