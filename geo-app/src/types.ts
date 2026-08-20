@@ -12,12 +12,14 @@ export type Base = 'ortofoto' | 'zm' | 'google'
 export type Placement = { lon: number; lat: number; groundH: number; heightOffset: number; heading: number; pitch: number; roll: number; scale: number }
 // uložený pohled kamery: ECEF pozice + heading/pitch/roll (radiány)
 // Vzhled uložený spolu s pohledem — zorný úhel a rozostření, aby každý pohled mohl vypadat jinak.
-// `shakeOn`/`shakeAmt` jsou NEPOVINNÉ: pohledy uložené před zavedením chvění je nemají a chybějící
-// hodnota znamená VYPNUTO — chvění se tak nikdy nezapne samo, uživatel si ho dá jen tam, kam chce.
+// Pohybové efekty (`shake*`, `spin*`) jsou NEPOVINNÉ: pohledy uložené dřív je nemají a chybějící
+// hodnota znamená VYPNUTO — nikdy se tedy nezapnou samy, uživatel si je dá jen tam, kam chce.
 export type CamLook = {
   fov: number; bloom: boolean
   dofOn: boolean; dofMode: 'dist' | 'circle'; dofFocal: number; dofBlur: number; dofRadius: number; dofFeather: number
   shakeOn?: boolean; shakeAmt?: number
+  /** kroužení kolem místa, na které se pohled dívá; `spinSpeed` je °/s a ZNAMÉNKO určuje směr */
+  spinOn?: boolean; spinSpeed?: number
 }
 // `look` je NEPOVINNÝ schválně: pohledy uložené dřív ho v localStorage nemají a musí se dál načíst.
 // Když chybí, přelet nechá aktuální nastavení být (viz gotoCamView).

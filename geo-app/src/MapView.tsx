@@ -25,7 +25,7 @@ import { Box, Layers, Map as MapIcon, Image, Search, Loader2, Building2, Upload,
 import {
   ION_TOKEN, isAbortError, ENABLE_GOOGLE_3D, ENABLE_OSM_BUILDINGS, ENABLE_LIBEREC_DISTRICTS, NEEDS_ION,
   GOOGLE_3D_ION_ASSET, SPLAT_ASSET_ID, SPLAT_ANCHOR, SPLAT_BASE_ROLL, SPLAT_PLACEMENT_KEY, SPLAT_ON_KEY,
-  BG_KEY, BG_CUSTOM_KEY, SHAKE_KEY, SHAKE_MAX_DEG, SHARP_KEY, ZOOM_SENS, ZOOM_TAU, ZOOM_MAX,
+  BG_KEY, BG_CUSTOM_KEY, SHAKE_KEY, SHAKE_MAX_DEG, SHARP_KEY, SPIN_KEY, SPIN_DEFAULT_DEG_S, ZOOM_SENS, ZOOM_TAU, ZOOM_MAX,
   CR_EXTENT, LIBEREC_EXTENT, GEOID_CZ, GOOGLE_LIFT_M, MAX_GLB_YAW_DEG, OSM_LIFT_M, MODEL_GLOW, EMPTY_NAMESET,
 } from './config'
 import type {
@@ -133,6 +133,20 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const [sharpness, setSharpness] = useState(() => {
     try { const v = Number(localStorage.getItem(SHARP_KEY)); return v >= 1 && v <= 2 ? v : 1 } catch { return 1 }
   })
+  // „Kroužení" — kamera pomalu obíhá kolem místa, na které se pohled dívá. Stejně jako chvění je
+  // to součást VZHLEDU POHLEDU (CamLook), ne globální volba, a po startu je vždycky vypnuté.
+  // V localStorage zůstává jen naposledy nastavená rychlost jako výchozí hodnota slideru.
+  const [spinOn, setSpinOn] = useState(false)
+  const [spinSpeed, setSpinSpeed] = useState(() => {
+    try { const s = JSON.parse(localStorage.getItem(SPIN_KEY) || '{}').speed; return typeof s === 'number' && s !== 0 ? s : SPIN_DEFAULT_DEG_S } catch { return SPIN_DEFAULT_DEG_S }
+  })
+  const spinRef = useRef({ on: false, speed: 0 })
+  // Pivot = bod, kolem kterého se krouží. Vzorkuje se jednou při rozjezdu (null = vzorkuj znovu),
+  // ne každý snímek: kroužením se střed obrazu drobně posouvá a dopočítávaný pivot by se rozjel.
+  const spinPivotRef = useRef<Cesium.Cartesian3 | null>(null)
+  // Do kdy se kroužit NEMÁ (ms, performance.now). Přelet na pohled si kameru řídí sám a kroužení
+  // by se s ním pralo — tak počká, až doletí, a teprve pak si vezme nový pivot.
+  const spinHoldRef = useRef(0)
   // „Kamera z ruky" — jemné chvění pohledu v prezentaci. Je součástí VZHLEDU POHLEDU (CamLook),
   // ne globální volba: každý uložený pohled si nese vlastní zapnutí i intenzitu, takže se chvění
   // dá dát jen na záběry, kterým sluší. Po startu je proto vždy VYPNUTÉ a čeká, až přiletíš na
@@ -2179,6 +2193,58 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     try { localStorage.setItem(SHAKE_KEY, JSON.stringify({ amt: shakeAmt })) } catch { /* */ }
   }, [shakeOn, shakeAmt, presentOn])
 
+  useEffect(() => {
+    const wasOn = spinRef.current.on
+    spinRef.current = { on: spinOn && presentOn, speed: spinSpeed }
+    if (!wasOn && spinRef.current.on) spinPivotRef.current = null // rozjezd → vezmi si čerstvý střed
+    // ukládá se JEN rychlost (výchozí pro slider); zapnutí patří uloženému pohledu, ne prohlížeči
+    try { localStorage.setItem(SPIN_KEY, JSON.stringify({ speed: spinSpeed })) } catch { /* */ }
+  }, [spinOn, spinSpeed, presentOn])
+
+  /**
+   * „Kroužení": kamera pomalu obíhá kolem místa, na které se dívá.
+   *
+   * Na rozdíl od chvění je to SKUTEČNÝ pohyb kamery, ne optický trik — o to jde, jinak by nevznikla
+   * paralaxa a scéna by nepůsobila prostorově. Kamera se proto opravdu přesouvá po kružnici kolem
+   * pivotu a orientace se otáčí s ní, takže předmět zůstává pořád uprostřed.
+   *
+   * Otáčí se přes `lookAtTransform` do ENU rámce pivotu, tam se udělá `rotate` kolem místné svislice
+   * a rámec se hned zase pustí (`Matrix4.IDENTITY`). Kamera si přitom nechá výslednou polohu ve
+   * světě, ale `camera.transform` zůstane jednotková — na tom stojí zbytek appky (chvění, snímkování
+   * i `viewCenterGround` počítají s neposunutým rámcem), takže si ho tu nesmíme nechat nastavený.
+   *
+   * Běží v `preUpdate`, tedy MIMO okno mezi pre/postRender, kde sedí chvění kamery — jinak by si
+   * obojí přepisovalo pozici. Ze stejného důvodu tu sedí i plynulé přiblížení.
+   */
+  useEffect(() => {
+    const v = viewerRef.current
+    if (!v || v.isDestroyed()) return
+    const scene = v.scene
+    const cam = scene.camera
+    const spinFrame = new Cesium.Matrix4() // scratch — 60fps smyčka, ať se nealokuje každý snímek
+    let last = performance.now()
+    const onPreUpdate = () => {
+      const now = performance.now()
+      const dt = Math.min(0.1, (now - last) / 1000) // po přepnutí tabu ať to neskočí naráz
+      last = now
+      const { on, speed } = spinRef.current
+      if (!on || !speed) return
+      if (now < spinHoldRef.current) { spinPivotRef.current = null; return } // ještě se letí
+      // Snímkování pohledů si kameru drží přes lookAt (nenulový transform) a chce klidné záběry.
+      if (!Cesium.Matrix4.equals(cam.transform, Cesium.Matrix4.IDENTITY)) return
+      if (!spinPivotRef.current) {
+        const g = viewCenterGround(v)
+        spinPivotRef.current = Cesium.Cartesian3.fromDegrees(g.lon, g.lat, g.height)
+      }
+      const frame = Cesium.Transforms.eastNorthUpToFixedFrame(spinPivotRef.current, undefined, spinFrame)
+      cam.lookAtTransform(frame)
+      cam.rotate(Cesium.Cartesian3.UNIT_Z, -Cesium.Math.toRadians(speed) * dt)
+      cam.lookAtTransform(Cesium.Matrix4.IDENTITY)
+    }
+    scene.preUpdate.addEventListener(onPreUpdate)
+    return () => { scene.preUpdate.removeEventListener(onPreUpdate) }
+  }, [])
+
   /**
    * „Kamera z ruky": jemné rozechvění pohledu v prezentaci.
    *
@@ -2315,7 +2381,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
 
   // ── uložené pohledy kamery (přežijí refresh) ──
   function persistCamViews(vs: CamView[]) { setCamViews(vs); try { localStorage.setItem('geo.camviews', JSON.stringify(vs)) } catch { /* */ } }
-  const currentLook = (): CamLook => ({ fov, bloom: bloomOn, dofOn, dofMode, dofFocal, dofBlur, dofRadius, dofFeather, shakeOn, shakeAmt })
+  const currentLook = (): CamLook => ({ fov, bloom: bloomOn, dofOn, dofMode, dofFocal, dofBlur, dofRadius, dofFeather, shakeOn, shakeAmt, spinOn, spinSpeed })
   /**
    * Přejede vzhled na cílový během přeletu — stejně dlouho a stejnou easeInOut jako pohyb kamery,
    * takže obojí dosedne naráz.
@@ -2326,6 +2392,8 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
    *  - `dofOn` se nepřepíná skokem: rozostření zůstane celou dobu zapnuté a přejíždí se jeho SÍLA
    *    z/na nulu, takže zapnutí i vypnutí vyblednou místo cvaknutí (stepSize 0 = žádné rozmazání).
    *  - `bloom` je jen přepínač, sepne se na konci.
+   *  - `spinOn`/`spinSpeed` (kroužení) se do přeletu vůbec nemíchají: kameru po tu dobu řídí let,
+   *    tak se zapnou až po doletu (drží je `spinHoldRef`) a vezmou si čerstvý střed pohledu.
    *  - `shakeOn`/`shakeAmt` jedou přes intenzitu jako rozostření (viz níž) — chvění patří k pohledu,
    *    takže se mezi záběry musí umět jak nasadit, tak utichnout.
    *
@@ -2375,6 +2443,9 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
       applyDofRaw({ on: to.dofOn, mode: to.dofMode, focal: to.dofFocal, blur: to.dofBlur, radius: to.dofRadius, feather: to.dofFeather })
       // amt si při vypnutém chvění nechá poslední hodnotu, ať slider nespadne na nulu
       setShakeOn(to.shakeOn ?? false); setShakeAmt(to.shakeAmt ?? shakeAmt)
+      // Kroužení se nerozjíždí postupně jako chvění — nemá cenu ho míchat do přeletu, kde kameru
+      // řídí let. Zapne se až po doletu (drží ho `spinHoldRef`) a vezme si čerstvý střed pohledu.
+      setSpinOn(to.spinOn ?? false); setSpinSpeed(to.spinSpeed ?? spinSpeed)
     }
     requestAnimationFrame(step)
   }
@@ -2392,6 +2463,10 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   }
   function gotoCamView(cv: CamView) {
     setActiveViewId(cv.id)               // řídí, které popisky jsou vysunuté
+    // Přelet trvá 3 s a kameru si po tu dobu řídí sám — kroužení musí počkat, jinak si přepisují
+    // pozici. Pivot se zahodí, ať si po doletu vezme střed NOVÉHO pohledu, ne toho, odkud se letělo.
+    spinHoldRef.current = performance.now() + 3200
+    spinPivotRef.current = null
     pulseLayerRef.current?.trigger(new Set(presentOn ? pulses.filter(p => p.views.includes(cv.id)).map(p => p.id) : []))
     if (cv.look) animateCamLook(cv.look) // starší pohledy `look` nemají → nastavení se nechá být
     if (orbitOn) orbitToCamView(cv); else gotoCamViewDirect(cv)
@@ -3799,6 +3874,39 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
                 </label>
               )}
             </div>
+            {/* Kroužení — kamera pomalu obíhá střed pohledu; ukládá se s pohledem, běží v prezentaci */}
+            <div className="flex flex-col gap-1.5 border-t border-gray-700 pt-2">
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer" title="Kamera velmi pomalu obíhá kolem místa, na které se pohled dívá, a drží ho uprostřed. Ukládá se s pohledem (tlačítko Uložit / ikona fotoaparátu). Střed se vezme po doletu na pohled.">
+                <input type="checkbox" checked={spinOn} onChange={e => setSpinOn(e.target.checked)} className="accent-sky-500" />
+                <span className="text-gray-200">Kroužení kolem místa</span>
+                {spinOn && !presentOn && <span className="ml-auto shrink-0 text-[10px] text-amber-500/80">jen v prezentaci</span>}
+              </label>
+              {spinOn && (<>
+                <label className="flex items-center gap-1.5 text-xs">
+                  <span className="text-gray-400 w-16 shrink-0">Rychlost</span>
+                  <input
+                    type="range" min={0.1} max={3} step={0.1} value={Math.abs(spinSpeed)}
+                    onChange={e => setSpinSpeed(Math.sign(spinSpeed || 1) * Number(e.target.value))}
+                    className="flex-1 min-w-0"
+                    title="Jak rychle kamera obíhá. I na maximu je to pomalý drift, ne otáčka."
+                  />
+                  <span className="w-12 text-right text-gray-300 tabular-nums">
+                    {(() => { const s = Math.round(360 / Math.abs(spinSpeed || 1)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` })()}
+                  </span>
+                </label>
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-gray-400 w-16 shrink-0">Směr</span>
+                  {([[-1, 'doleva'], [1, 'doprava']] as const).map(([dir, lbl]) => (
+                    <button
+                      key={dir}
+                      onClick={() => setSpinSpeed(dir * Math.abs(spinSpeed || 1))}
+                      className={`flex-1 rounded-lg px-2 py-1 text-xs ${Math.sign(spinSpeed || 1) === dir ? 'bg-sky-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                    >{lbl}</button>
+                  ))}
+                </div>
+                <div className="px-1 text-[10px] leading-snug text-gray-600">Čas je jedna celá otáčka.</div>
+              </>)}
+            </div>
             {/* uložené pohledy */}
             <div className="flex flex-col gap-1">
               <div className="text-[10px] uppercase tracking-wide text-gray-500">Uložené pohledy</div>
@@ -3819,7 +3927,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
                   <button onClick={() => delCamView(i)} title="Smazat" className="p-0.5 rounded text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
                 </div>
               ))}
-              {!camViews.length && <div className="text-[10px] text-gray-600 leading-snug">Zatím žádné — natoč si kameru, napiš název a dej „Uložit". Uloží se i zorný úhel, rozostření a chvění kamery. Přežijí refresh.</div>}
+              {!camViews.length && <div className="text-[10px] text-gray-600 leading-snug">Zatím žádné — natoč si kameru, napiš název a dej „Uložit". Uloží se i zorný úhel, rozostření, chvění a kroužení. Přežijí refresh.</div>}
               <label className="flex items-center gap-1.5 text-xs cursor-pointer mt-0.5" title="Kamera nepoletí napřímo, ale obloukem kolem toho, na co zrovna koukáš — objekt uprostřed zůstane uprostřed.">
                 <input type="checkbox" checked={orbitOn} onChange={e => setOrbitOn(e.target.checked)} className="accent-sky-500" />
                 <span className="text-gray-200">Přelet obloukem (orbit kolem středu)</span>

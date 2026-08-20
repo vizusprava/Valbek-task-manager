@@ -36,6 +36,9 @@ export const SPLAT_BASE_ROLL = -90
 export const SPLAT_PLACEMENT_KEY = `geo.splat.placement.${SPLAT_ASSET_ID}` // uložené ruční usazení (localStorage)
 export const BG_KEY = 'geo.pozadi'           // režim pozadí scény (přežije reload)
 export const SHARP_KEY = 'geo.ostrost'      // supersampling nad rámec fyzických pixelů displeje
+export const SPIN_KEY = 'geo.kamera.krouzeni' // { speed } — jen výchozí rychlost slideru;
+                                              // zapnutí kroužení patří uloženému pohledu (CamLook)
+export const SPIN_DEFAULT_DEG_S = 1           // °/s — jedna otáčka za 6 min, pomalý filmový drift
 export const SHAKE_KEY = 'geo.kamera.handheld' // { amt } — jen výchozí intenzita slideru;
                                               // zapnutí chvění patří uloženému pohledu (CamLook)
 export const SHAKE_MAX_DEG = 1.1             // výchylka pohledu při intenzitě 100 % (pořád jen plutí, ne třas)
