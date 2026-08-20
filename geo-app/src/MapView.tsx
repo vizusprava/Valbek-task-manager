@@ -18,7 +18,7 @@ import { createCircleDofStage, type CircleDofUniforms } from './dofCircle'
 import { CalloutLayer, DOT_DEFAULT, FRAME_DEFAULT, SIZE_DEFAULT, type Callout } from './callouts'
 import { PulseLayer, PULSE_COLOR_DEFAULT, PULSE_COUNT_DEFAULT, type PulseSet } from './pulse'
 // pozn.: `Ruler` je i ikona z lucide-react → typ si přejmenujeme, ať se to nepere
-import { RulerLayer, fmtLen, rulerTotals, type Ruler as RulerData, type RulerPoint } from './ruler'
+import { RulerLayer, fmtLen, rulerTotals, rulerArea, type Ruler as RulerData, type RulerPoint } from './ruler'
 import { applyBackground, BG_MODES, type BgMode } from './background'
 import proj4 from 'proj4'
 import polygonClipping from 'polygon-clipping'
@@ -264,6 +264,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   // Hotová měření žijí ve stavu (a v localStorage), rozkreslené se pozná podle `rulerDraftId`.
   // Vrstva si kreslení řídí sama (ruler.ts) a čte živá data, takže tažení bodu nemusí přes React.
   const [rulerMode, setRulerMode] = useState(false)
+  const [rulerKind, setRulerKind] = useState<'line' | 'area'>('line') // co založí další klik do prázdna
   const [rulers, setRulers] = useState<RulerData[]>(() => {
     try { const j = JSON.parse(localStorage.getItem('geo.mereni') || '[]'); return Array.isArray(j) ? j as RulerData[] : [] } catch { return [] }
   })
@@ -272,6 +273,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
   const rulerLayerRef = useRef<RulerLayer | null>(null)
   const rulersRef = useRef(rulers); rulersRef.current = rulers
   const rulerDraftRef = useRef<string | null>(null); rulerDraftRef.current = rulerDraftId
+  const kindRef = useRef(rulerKind); kindRef.current = rulerKind
   const [areaPtCount, setAreaPtCount] = useState(0)
   const [areaLoading, setAreaLoading] = useState(false)
   const areaPtsRef = useRef<Cesium.Cartesian3[]>([])
@@ -1162,7 +1164,7 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
         persistRulers(rulersRef.current.map(r => r.id === draft ? { ...r, pts: [...r.pts, p] } : r))
       } else {
         const id = `m${Date.now()}`
-        persistRulers([...rulersRef.current, { id, name: `Měření ${rulersRef.current.length + 1}`, pts: [p] }])
+        persistRulers([...rulersRef.current, { id, name: `${kindRef.current === 'area' ? 'Plocha' : 'Měření'} ${rulersRef.current.length + 1}`, pts: [p], kind: kindRef.current }])
         setRulerDraftId(id)
         setRulerSel(id)
       }
@@ -1175,19 +1177,23 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rulerMode])
 
-  /** ukončí rozkreslené měření; jednobodové zahodí (samotný bod nic neměří) */
+  /** Ukončí rozkreslené měření. Zahodí nedodělky, které nic neměří: čáru o jednom bodu
+   *  a plochu, která nemá aspoň tři body (dvěma body se plocha vymezit nedá). */
   function finishRuler() {
     const draft = rulerDraftRef.current
     if (!draft) return
     const r = rulersRef.current.find(x => x.id === draft)
-    if (r && r.pts.length < 2) persistRulers(rulersRef.current.filter(x => x.id !== draft))
+    const need = r?.kind === 'area' ? 3 : 2
+    if (r && r.pts.length < need) persistRulers(rulersRef.current.filter(x => x.id !== draft))
     setRulerDraftId(null)
   }
 
   /** Zapnutí měření vypne ostatní klikací režimy — jinak by jeden klik dělal dvě věci naráz.
    *  Hotová měření v mapě ale zůstávají, ta na režimu nezávisí. */
-  function toggleRulerMode() {
-    if (rulerMode) { finishRuler(); setRulerMode(false); return }
+  function startRuler(kind: 'line' | 'area') {
+    if (rulerMode && rulerKind === kind) { finishRuler(); setRulerMode(false); return }
+    finishRuler()                 // rozkreslené se ukončí, i když se jen přepíná druh
+    setRulerKind(kind)
     setMoveMode(false); setParcelMode(false); setTileMode(false); setRegionMode(false)
     if (areaMode) { clearArea(); setAreaMode(false) }
     setRulerMode(true)
@@ -3388,24 +3394,36 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
           </Section>
           <Section id="mereni" title="Měření" dflt={false} badge={rulers.length} open={openSec} onToggle={toggleSec}>
             <ToggleBtn
-              active={rulerMode}
-              onClick={toggleRulerMode}
+              active={rulerMode && rulerKind === 'line'}
+              onClick={() => startRuler('line')}
               icon={<Ruler size={15} />}
-              label={rulerMode ? (rulerDraftId ? 'Klikej další body' : 'Klikni první bod') : 'Měřit vzdálenost'}
+              label={rulerMode && rulerKind === 'line' ? (rulerDraftId ? 'Klikej další body' : 'Klikni první bod') : 'Měřit vzdálenost'}
+            />
+            <ToggleBtn
+              active={rulerMode && rulerKind === 'area'}
+              onClick={() => startRuler('area')}
+              icon={<Hexagon size={15} />}
+              label={rulerMode && rulerKind === 'area' ? (rulerDraftId ? 'Klikej obvod plochy' : 'Klikni první bod') : 'Měřit plochu'}
             />
             {rulerMode && (
               <div className="max-w-[200px] px-1 text-[10px] leading-snug text-gray-500">
-                Každý klik přidá bod, u úseku se ukáže jeho délka. Bod jde chytit a přetáhnout jinam.
-                Měření ukončíš pravým klikem nebo tlačítkem níž — zůstane v mapě a můžeš začít další.
+                {rulerKind === 'area'
+                  ? 'Naklikej obvod plochy (aspoň tři body) — uvnitř se ukáže výměra, u stran jejich délky. Uzavře se sama, poslední bod s prvním spojovat nemusíš.'
+                  : 'Každý klik přidá bod, u úseku se ukáže jeho délka.'}
+                {' '}Bod jde chytit a přetáhnout jinam. Ukončíš pravým klikem nebo tlačítkem níž — zůstane v mapě a můžeš začít další.
               </div>
             )}
             {rulerMode && rulerDraftId && (
               <button onClick={finishRuler} className="flex items-center gap-2 rounded-lg bg-amber-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-amber-500">
-                <Check size={15} /> Ukončit toto měření
+                <Check size={15} /> Ukončit {rulerKind === 'area' ? 'tuto plochu' : 'toto měření'}
               </button>
             )}
             {rulers.map(r => {
-              const t = rulerTotals(r.pts)
+              // u plochy je hlavní číslo výměra, u čáry celková délka
+              const a = r.kind === 'area' ? rulerArea(r.pts) : null
+              const val = r.kind === 'area'
+                ? (a ? fmtArea(a.area) : '—')
+                : (r.pts.length > 1 ? fmtLen(rulerTotals(r.pts).len) : '—')
               return (
                 <div
                   key={r.id}
@@ -3417,8 +3435,8 @@ export function MapView({ onBackToEditor }: { onBackToEditor: () => void }) {
                     {r.name}
                     {r.id === rulerDraftId && <span className="ml-1 text-[9px] text-amber-500/80">kreslí se</span>}
                   </span>
-                  <span className="shrink-0 text-[11px] tabular-nums text-amber-300">{r.pts.length > 1 ? fmtLen(t.len) : '—'}</span>
-                  <button onClick={() => delRuler(r.id)} title="Smazat toto měření" className="shrink-0 rounded p-0.5 text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
+                  <span className="shrink-0 text-[11px] tabular-nums text-amber-300">{val}</span>
+                  <button onClick={() => delRuler(r.id)} title={r.kind === 'area' ? 'Smazat tuto plochu' : 'Smazat toto měření'} className="shrink-0 rounded p-0.5 text-gray-500 hover:text-red-300"><Trash2 size={13} /></button>
                 </div>
               )
             })}
