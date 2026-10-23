@@ -381,6 +381,9 @@ export function DashboardPage() {
       return byProject
     },
     enabled: projects.length > 0,
+    // Úkoly se mění na stránce projektu, kde dashboard není připojený k realtime
+    // — při každém návratu na dashboard proto statistiky načíst znovu
+    staleTime: 0,
   })
 
   // Realtime subscription
