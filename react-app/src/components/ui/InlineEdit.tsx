@@ -27,7 +27,12 @@ export function InlineSelect<T extends string>({ value, options, onChange, rende
     e.stopPropagation()
     if (!triggerRef.current) return
     const rect = triggerRef.current.getBoundingClientRect()
-    setPos({ top: rect.bottom + window.scrollY + 4, left: rect.left + window.scrollX })
+    // Odhad výšky menu; když se pod spouštěč nevejde, otevře se nahoru
+    const menuH = Object.keys(options).length * 32 + 8
+    const top = window.innerHeight - rect.bottom < menuH + 8 && rect.top > menuH + 8
+      ? rect.top - menuH - 4
+      : rect.bottom + 4
+    setPos({ top: top + window.scrollY, left: rect.left + window.scrollX })
     setOpen(o => !o)
   }
 
@@ -39,13 +44,13 @@ export function InlineSelect<T extends string>({ value, options, onChange, rende
       {open && createPortal(
         <div
           style={{ position: 'absolute', top: pos.top, left: pos.left, zIndex: 9999 }}
-          className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl overflow-hidden min-w-36"
+          className="w-max min-w-36 py-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl overflow-hidden"
           onMouseDown={e => e.stopPropagation()}
         >
           {Object.entries(options).map(([v, label]) => (
             <button key={v}
               onClick={e => { e.stopPropagation(); onChange(v as T); setOpen(false) }}
-              className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800 ${v === value ? 'font-semibold text-indigo-600 dark:text-indigo-400' : 'text-gray-700 dark:text-gray-300'}`}>
+              className={`block w-full h-8 text-left px-3 text-sm whitespace-nowrap hover:bg-gray-50 dark:hover:bg-gray-800 ${v === value ? 'font-semibold text-indigo-600 dark:text-indigo-400' : 'text-gray-700 dark:text-gray-300'}`}>
               {label}
             </button>
           ))}
