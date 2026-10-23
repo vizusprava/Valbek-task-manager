@@ -45,17 +45,24 @@ export function isDueSoon(dueDateStr: string | null | undefined, days = 7): bool
   return due >= today && due <= soon
 }
 
+// Pořadí klíčů = pořadí workflow (z něj se staví všechny výběry stavu)
 export const STATUS_LABELS: Record<TaskStatus, string> = {
-  'neudělano':              'Neudělano',
+  'neudělano':              'Neuděláno',
+  'připravený podklad':     'Připravený podklad',
   'rozpracováno':           'Rozpracováno',
-  'připraveno ke kontrole': 'Ke kontrole',
+  'kontrola pracovník':     'Kontrola pracovník',
+  'připraveno ke kontrole': 'Kontrola nadřízený',
   'schváleno':              'Schváleno',
   'hotovo':                 'Hotovo',
 }
 
+export const STATUS_ORDER = Object.keys(STATUS_LABELS) as TaskStatus[]
+
 export const STATUS_WEIGHTS: Record<TaskStatus, number> = {
   'neudělano':              10,
+  'připravený podklad':     20,
   'rozpracováno':           30,
+  'kontrola pracovník':     60,
   'připraveno ke kontrole': 75,
   'schváleno':              90,
   'hotovo':                 100,
@@ -63,10 +70,23 @@ export const STATUS_WEIGHTS: Record<TaskStatus, number> = {
 
 export const STATUS_COLORS: Record<TaskStatus, string> = {
   'neudělano':              'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300',
+  'připravený podklad':     'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
   'rozpracováno':           'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  'kontrola pracovník':     'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300',
   'připraveno ke kontrole': 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   'schváleno':              'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
   'hotovo':                 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+}
+
+// Plné barvy pro tečky a pruhy grafů
+export const STATUS_DOT_COLORS: Record<TaskStatus, string> = {
+  'neudělano':              'bg-gray-400',
+  'připravený podklad':     'bg-sky-500',
+  'rozpracováno':           'bg-blue-500',
+  'kontrola pracovník':     'bg-violet-500',
+  'připraveno ke kontrole': 'bg-amber-500',
+  'schváleno':              'bg-teal-500',
+  'hotovo':                 'bg-emerald-500',
 }
 
 export const PRIORITY_LABELS: Record<TaskPriority, string> = {

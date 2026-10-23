@@ -9,23 +9,25 @@ import { PageLayout } from '@/components/layout/PageLayout'
 import { Avatar } from '@/components/ui/Avatar'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
-import { formatDate, isOverdue, isDueSoon, STATUS_WEIGHTS } from '@/lib/utils'
+import { formatDate, isOverdue, isDueSoon, STATUS_WEIGHTS, STATUS_ORDER, STATUS_LABELS, STATUS_DOT_COLORS } from '@/lib/utils'
 import { ManageTaskTemplatesModal } from '@/components/ui/TaskTemplatesModal'
-import type { Profile, Project } from '@/lib/types'
+import type { Profile, Project, TaskStatus } from '@/lib/types'
 
 type FilterType = 'aktivní' | 'dokončeno' | 'vše'
 
 interface ProjectWithStats extends Project {
   project_members: { user_id: string }[]
-  _stats?: { total: number; done: number; approved: number; review: number; inprog: number; todo: number }
+  _stats?: TaskStats
   _members?: Profile[]
 }
+
+interface TaskStats { total: number; byStatus: Partial<Record<TaskStatus, number>> }
 
 // ── Project Card ──────────────────────────────────────────────
 
 function ProjectCard({ project, members }: { project: ProjectWithStats; members: Profile[] }) {
-  const stats    = project._stats ?? { total: 0, done: 0, approved: 0, review: 0, inprog: 0, todo: 0 }
-  const weightedSum = stats.todo * STATUS_WEIGHTS['neudělano'] + stats.inprog * STATUS_WEIGHTS['rozpracováno'] + stats.review * STATUS_WEIGHTS['připraveno ke kontrole'] + stats.approved * STATUS_WEIGHTS['schváleno'] + stats.done * STATUS_WEIGHTS['hotovo']
+  const stats    = project._stats ?? { total: 0, byStatus: {} }
+  const weightedSum = STATUS_ORDER.reduce((s, st) => s + (stats.byStatus[st] ?? 0) * STATUS_WEIGHTS[st], 0)
   const pct      = stats.total > 0 ? Math.round(weightedSum / stats.total) : 0
   const overdue  = isOverdue(project.due_date) && project.status !== 'dokončeno'
   const dueSoon  = !overdue && isDueSoon(project.due_date) && project.status !== 'dokončeno'
@@ -72,11 +74,9 @@ function ProjectCard({ project, members }: { project: ProjectWithStats; members:
 
       {/* Stats dots */}
       <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
-        {stats.todo > 0 && <span className="flex items-center gap-1" title="Neudělano"><span className="w-2 h-2 rounded-full bg-gray-400 inline-block" />{stats.todo}</span>}
-        {stats.inprog > 0 && <span className="flex items-center gap-1" title="Rozpracováno"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" />{stats.inprog}</span>}
-        {stats.review > 0 && <span className="flex items-center gap-1" title="Ke kontrole"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />{stats.review}</span>}
-        {stats.approved > 0 && <span className="flex items-center gap-1" title="Schváleno"><span className="w-2 h-2 rounded-full bg-teal-500 inline-block" />{stats.approved}</span>}
-        {stats.done > 0 && <span className="flex items-center gap-1" title="Hotovo"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />{stats.done}</span>}
+        {STATUS_ORDER.map(st => (stats.byStatus[st] ?? 0) > 0 && (
+          <span key={st} className="flex items-center gap-1" title={STATUS_LABELS[st]}><span className={`w-2 h-2 rounded-full ${STATUS_DOT_COLORS[st]} inline-block`} />{stats.byStatus[st]}</span>
+        ))}
       </div>
 
       {/* Progress bar */}
@@ -371,15 +371,12 @@ export function DashboardPage() {
     queryFn: async () => {
       if (!projects.length) return {}
       const { data } = await supabase.from('tasks').select('project_id, status').in('project_id', projects.map(p => p.id))
-      const byProject: Record<string, { total: number; done: number; approved: number; review: number; inprog: number; todo: number }> = {}
+      const byProject: Record<string, TaskStats> = {}
       for (const t of data || []) {
-        if (!byProject[t.project_id]) byProject[t.project_id] = { total: 0, done: 0, approved: 0, review: 0, inprog: 0, todo: 0 }
-        byProject[t.project_id].total++
-        if (t.status === 'hotovo') byProject[t.project_id].done++
-        else if (t.status === 'schváleno') byProject[t.project_id].approved++
-        else if (t.status === 'připraveno ke kontrole') byProject[t.project_id].review++
-        else if (t.status === 'rozpracováno') byProject[t.project_id].inprog++
-        else byProject[t.project_id].todo++
+        const p = byProject[t.project_id] ??= { total: 0, byStatus: {} }
+        const st = t.status as TaskStatus
+        p.total++
+        p.byStatus[st] = (p.byStatus[st] ?? 0) + 1
       }
       return byProject
     },

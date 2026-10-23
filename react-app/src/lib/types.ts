@@ -1,5 +1,13 @@
 export type Role = 'admin' | 'user'
-export type TaskStatus = 'neudělano' | 'rozpracováno' | 'připraveno ke kontrole' | 'schváleno' | 'hotovo'
+// 'připraveno ke kontrole' = v UI "Kontrola nadřízený" (hodnota v DB zůstala kvůli existujícím úkolům)
+export type TaskStatus =
+  | 'neudělano'
+  | 'připravený podklad'
+  | 'rozpracováno'
+  | 'kontrola pracovník'
+  | 'připraveno ke kontrole'
+  | 'schváleno'
+  | 'hotovo'
 export type TaskPriority = 'low' | 'medium' | 'high'
 
 export interface Profile {

@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/authStore'
 import { PageLayout } from '@/components/layout/PageLayout'
 import { Avatar } from '@/components/ui/Avatar'
 import { PriorityBadge } from '@/components/ui/Badge'
-import { STATUS_WEIGHTS } from '@/lib/utils'
+import { STATUS_WEIGHTS, STATUS_ORDER, STATUS_LABELS, STATUS_DOT_COLORS as STATUS_COLORS } from '@/lib/utils'
 import type { Task, Project, Profile, Subproject } from '@/lib/types'
 
 // ── Types ─────────────────────────────────────────────────────
@@ -17,21 +17,6 @@ interface ProjectWithMembers extends Project {
 
 // ── Helpers ───────────────────────────────────────────────────
 
-const STATUS_ORDER = ['neudělano', 'rozpracováno', 'připraveno ke kontrole', 'schváleno', 'hotovo'] as const
-const STATUS_LABELS: Record<string, string> = {
-  'neudělano': 'Neudělano',
-  'rozpracováno': 'Rozpracováno',
-  'připraveno ke kontrole': 'Ke kontrole',
-  'schváleno': 'Schváleno',
-  'hotovo': 'Hotovo',
-}
-const STATUS_COLORS: Record<string, string> = {
-  'neudělano': 'bg-gray-400',
-  'rozpracováno': 'bg-blue-500',
-  'připraveno ke kontrole': 'bg-yellow-500',
-  'schváleno': 'bg-teal-500',
-  'hotovo': 'bg-green-500',
-}
 
 function isOverdue(task: Task) {
   return task.due_date && task.status !== 'hotovo' && task.status !== 'schváleno' && new Date(task.due_date) < new Date()
