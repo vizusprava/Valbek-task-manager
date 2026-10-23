@@ -3,7 +3,7 @@ import logoUrl from '@/assets/logo.png'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, ListTodo, Box, ClipboardCheck, BarChart2,
-  Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes, Lightbulb, Table2,
+  Bell, Sun, Moon, Menu, X, LogOut, Palette, Boxes, Lightbulb, Table2, BookOpen,
   Map as MapIcon,
   type LucideIcon,
 } from 'lucide-react'
@@ -242,6 +242,7 @@ export function Navbar() {
         {navItem('/reports',    'Reporty',        BarChart2)}
         {navItem('/inspiration', 'Inspirace',     Lightbulb)}
         {navItem('/tables',     'Tabulky',        Table2)}
+        {navItem('/guides',     'Návody',         BookOpen)}
 
       </nav>
 

@@ -19,6 +19,7 @@ const ModelsPage    = lazy(() => import('@/pages/ModelsPage').then(m => ({ defau
 const InspiracePage = lazy(() => import('@/pages/InspiracePage').then(m => ({ default: m.InspiracePage })))
 const TablesPage    = lazy(() => import('@/pages/TablesPage').then(m => ({ default: m.TablesPage })))
 const GeoPage       = lazy(() => import('@/pages/GeoPage').then(m => ({ default: m.GeoPage })))
+const GuidesPage    = lazy(() => import('@/pages/GuidesPage').then(m => ({ default: m.GuidesPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -97,6 +98,7 @@ export default function App() {
           <Route path="/reports" element={<AuthGuard><ReportsPage /></AuthGuard>} />
           <Route path="/inspiration" element={<AuthGuard><InspiracePage /></AuthGuard>} />
           <Route path="/tables" element={<AuthGuard><TablesPage /></AuthGuard>} />
+          <Route path="/guides" element={<AuthGuard><GuidesPage /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
         </Suspense>
